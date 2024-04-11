@@ -1,22 +1,3 @@
-// Copyright (C) 2016  ParadoxSpiral
-//
-// This file is part of mpv-rs.
-//
-// This library is free software; you can redistribute it and/or
-// modify it under the terms of the GNU Lesser General Public
-// License as published by the Free Software Foundation; either
-// version 2.1 of the License, or (at your option) any later version.
-//
-// This library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-// Lesser General Public License for more details.
-//
-// You should have received a copy of the GNU Lesser General Public
-// License along with this library; if not, write to the Free Software
-// Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
-
-use std::convert::TryInto;
 use std::marker::PhantomData;
 
 macro_rules! mpv_cstr_to_str {
@@ -39,6 +20,7 @@ pub mod protocol;
 pub mod render;
 
 pub use self::errors::*;
+use self::events::EventContext;
 use super::*;
 
 use std::{
@@ -113,7 +95,7 @@ pub enum MpvNodeValue<'a> {
 #[derive(Debug)]
 pub struct MpvNodeArrayIter<'parent> {
     curr: i32,
-    list: libmpv_sys::mpv_node_list,
+    list: libmpv2_sys::mpv_node_list,
     _does_not_outlive: PhantomData<&'parent MpvNode>,
 }
 
@@ -134,7 +116,7 @@ impl Iterator for MpvNodeArrayIter<'_> {
 #[derive(Debug)]
 pub struct MpvNodeMapIter<'parent> {
     curr: i32,
-    list: libmpv_sys::mpv_node_list,
+    list: libmpv2_sys::mpv_node_list,
     _does_not_outlive: PhantomData<&'parent MpvNode>,
 }
 
@@ -159,11 +141,11 @@ impl<'parent> Iterator for MpvNodeMapIter<'parent> {
 }
 
 #[derive(Debug)]
-pub struct MpvNode(libmpv_sys::mpv_node);
+pub struct MpvNode(libmpv2_sys::mpv_node);
 
 impl Drop for MpvNode {
     fn drop(&mut self) {
-        unsafe { libmpv_sys::mpv_free_node_contents(&mut self.0 as *mut libmpv_sys::mpv_node) };
+        unsafe { libmpv2_sys::mpv_free_node_contents(&mut self.0 as *mut libmpv2_sys::mpv_node) };
     }
 }
 
@@ -285,7 +267,7 @@ unsafe impl GetData for String {
         let _ = fun(ptr as *mut *const ctype::c_char as _)?;
 
         let ret = unsafe { mpv_cstr_to_str!(*ptr) }?.to_owned();
-        unsafe { libmpv_sys::mpv_free(*ptr as *mut _) };
+        unsafe { libmpv2_sys::mpv_free(*ptr as *mut _) };
         Ok(ret)
     }
 
@@ -317,7 +299,7 @@ impl<'a> Deref for MpvStr<'a> {
 }
 impl<'a> Drop for MpvStr<'a> {
     fn drop(&mut self) {
-        unsafe { libmpv_sys::mpv_free(self.0.as_ptr() as *mut u8 as _) };
+        unsafe { libmpv2_sys::mpv_free(self.0.as_ptr() as *mut u8 as _) };
     }
 }
 
@@ -392,7 +374,7 @@ impl FileState {
 
 /// Context passed to the `initializer` of `Mpv::with_initialzer`.
 pub struct MpvInitializer {
-    ctx: *mut libmpv_sys::mpv_handle,
+    ctx: *mut libmpv2_sys::mpv_handle,
 }
 
 impl MpvInitializer {
@@ -402,7 +384,18 @@ impl MpvInitializer {
         let format = T::get_format().as_mpv_format() as _;
         data.call_as_c_void(|ptr| {
             mpv_err((), unsafe {
-                libmpv_sys::mpv_set_property(self.ctx, name.as_ptr(), format, ptr)
+                libmpv2_sys::mpv_set_property(self.ctx, name.as_ptr(), format, ptr)
+            })
+        })
+    }
+
+    /// Set the value of an option
+    pub fn set_option<T: SetData>(&self, name: &str, data: T) -> Result<()> {
+        let name = CString::new(name)?;
+        let format = T::get_format().as_mpv_format() as _;
+        data.call_as_c_void(|ptr| {
+            mpv_err((), unsafe {
+                libmpv2_sys::mpv_set_option(self.ctx, name.as_ptr(), format, ptr)
             })
         })
     }
@@ -411,8 +404,8 @@ impl MpvInitializer {
 /// The central mpv context.
 pub struct Mpv {
     /// The handle to the mpv core
-    pub ctx: NonNull<libmpv_sys::mpv_handle>,
-    events_guard: AtomicBool,
+    pub ctx: NonNull<libmpv2_sys::mpv_handle>,
+    event_context: EventContext,
     #[cfg(feature = "protocols")]
     protocols_guard: AtomicBool,
 }
@@ -423,7 +416,7 @@ unsafe impl Sync for Mpv {}
 impl Drop for Mpv {
     fn drop(&mut self) {
         unsafe {
-            libmpv_sys::mpv_terminate_destroy(self.ctx.as_ptr());
+            libmpv2_sys::mpv_terminate_destroy(self.ctx.as_ptr());
         }
     }
 }
@@ -440,7 +433,7 @@ impl Mpv {
     pub fn with_initializer<F: FnOnce(MpvInitializer) -> Result<()>>(
         initializer: F,
     ) -> Result<Mpv> {
-        let api_version = unsafe { libmpv_sys::mpv_client_api_version() };
+        let api_version = unsafe { libmpv2_sys::mpv_client_api_version() };
         if crate::MPV_CLIENT_API_MAJOR != api_version >> 16 {
             return Err(Error::VersionMismatch {
                 linked: crate::MPV_CLIENT_API_VERSION,
@@ -448,20 +441,22 @@ impl Mpv {
             });
         }
 
-        let ctx = unsafe { libmpv_sys::mpv_create() };
+        let ctx = unsafe { libmpv2_sys::mpv_create() };
         if ctx.is_null() {
             return Err(Error::Null);
         }
 
         initializer(MpvInitializer { ctx })?;
-        mpv_err((), unsafe { libmpv_sys::mpv_initialize(ctx) }).map_err(|err| {
-            unsafe { libmpv_sys::mpv_terminate_destroy(ctx) };
+        mpv_err((), unsafe { libmpv2_sys::mpv_initialize(ctx) }).map_err(|err| {
+            unsafe { libmpv2_sys::mpv_terminate_destroy(ctx) };
             err
         })?;
 
+        let ctx = unsafe { NonNull::new_unchecked(ctx) };
+
         Ok(Mpv {
-            ctx: unsafe { NonNull::new_unchecked(ctx) },
-            events_guard: AtomicBool::new(false),
+            ctx,
+            event_context: EventContext::new(ctx),
             #[cfg(feature = "protocols")]
             protocols_guard: AtomicBool::new(false),
         })
@@ -471,10 +466,20 @@ impl Mpv {
     pub fn load_config(&self, path: &str) -> Result<()> {
         let file = CString::new(path)?.into_raw();
         let ret = mpv_err((), unsafe {
-            libmpv_sys::mpv_load_config_file(self.ctx.as_ptr(), file)
+            libmpv2_sys::mpv_load_config_file(self.ctx.as_ptr(), file)
         });
-        unsafe { CString::from_raw(file) };
+        unsafe {
+            drop(CString::from_raw(file));
+        };
         ret
+    }
+
+    pub fn event_context(&self) -> &EventContext {
+        &self.event_context
+    }
+
+    pub fn event_context_mut(&mut self) -> &mut EventContext {
+        &mut self.event_context
     }
 
     /// Send a command to the `Mpv` instance. This uses `mpv_command_string` internally,
@@ -485,13 +490,13 @@ impl Mpv {
         let mut cmd = name.to_owned();
 
         for elem in args {
-            cmd.push_str(" ");
+            cmd.push(' ');
             cmd.push_str(elem);
         }
 
         let raw = CString::new(cmd)?;
         mpv_err((), unsafe {
-            libmpv_sys::mpv_command_string(self.ctx.as_ptr(), raw.as_ptr())
+            libmpv2_sys::mpv_command_string(self.ctx.as_ptr(), raw.as_ptr())
         })
     }
 
@@ -501,7 +506,7 @@ impl Mpv {
         let format = T::get_format().as_mpv_format() as _;
         data.call_as_c_void(|ptr| {
             mpv_err((), unsafe {
-                libmpv_sys::mpv_set_property(self.ctx.as_ptr(), name.as_ptr(), format, ptr)
+                libmpv2_sys::mpv_set_property(self.ctx.as_ptr(), name.as_ptr(), format, ptr)
             })
         })
     }
@@ -513,7 +518,7 @@ impl Mpv {
         let format = T::get_format().as_mpv_format() as _;
         T::get_from_c_void(|ptr| {
             mpv_err((), unsafe {
-                libmpv_sys::mpv_get_property(self.ctx.as_ptr(), name.as_ptr(), format, ptr)
+                libmpv2_sys::mpv_get_property(self.ctx.as_ptr(), name.as_ptr(), format, ptr)
             })
         })
     }
@@ -522,7 +527,7 @@ impl Mpv {
     ///
     /// This can be called at any time, even if it was stated that no API function should be called.
     pub fn get_internal_time(&self) -> i64 {
-        unsafe { libmpv_sys::mpv_get_time_us(self.ctx.as_ptr()) }
+        unsafe { libmpv2_sys::mpv_get_time_us(self.ctx.as_ptr()) }
     }
 
     // --- Convenience property functions ---

@@ -1,22 +1,4 @@
-// Copyright (C) 2016  ParadoxSpiral
-//
-// This file is part of libmpv-rs.
-//
-// This library is free software; you can redistribute it and/or
-// modify it under the terms of the GNU Lesser General Public
-// License as published by the Free Software Foundation; either
-// version 2.1 of the License, or (at your option) any later version.
-//
-// This library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-// Lesser General Public License for more details.
-//
-// You should have received a copy of the GNU Lesser General Public
-// License along with this library; if not, write to the Free Software
-// Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
-
-use crate::events::{Event, PropertyData};
+use crate::events::{Event, EventContext, PropertyData};
 use crate::*;
 
 use std::collections::HashMap;
@@ -88,7 +70,7 @@ macro_rules! assert_event_occurs {
 #[test]
 fn events() {
     let mpv = Mpv::new().unwrap();
-    let mut ev_ctx = mpv.create_event_context();
+    let mut ev_ctx = EventContext::new(mpv.ctx);
     ev_ctx.disable_deprecated_events().unwrap();
 
     ev_ctx.observe_property("volume", Format::Int64, 0).unwrap();
@@ -97,7 +79,6 @@ fn events() {
         .unwrap();
 
     mpv.set_property("vo", "null").unwrap();
-    mpv.set_property("ytdl", false).unwrap();
 
     assert_event_occurs!(
         ev_ctx,
@@ -121,23 +102,25 @@ fn events() {
     );
     assert!(ev_ctx.wait_event(3.).is_none());
 
-    mpv.playlist_load_files(&[(
-        "https://www.youtube.com/watch?v=DLzxrzFCyOs",
-        FileState::AppendPlay,
-        None,
-    )])
-    .unwrap();
+    mpv.playlist_load_files(&[("test-data/jellyfish.mp4", FileState::AppendPlay, None)])
+        .unwrap();
     assert_event_occurs!(ev_ctx, 10., Ok(Event::StartFile));
     assert_event_occurs!(
         ev_ctx,
         10.,
         Ok(Event::PropertyChange {
             name: "media-title",
-            change: PropertyData::Str("watch?v=DLzxrzFCyOs"),
+            change: PropertyData::Str("jellyfish.mp4"),
             reply_userdata: 1,
         })
     );
-    assert_event_occurs!(ev_ctx, 20., Err(Error::Raw(mpv_error::UnknownFormat)));
+    assert_event_occurs!(ev_ctx, 20., Ok(Event::AudioReconfig));
+    assert_event_occurs!(ev_ctx, 20., Ok(Event::AudioReconfig));
+    assert_event_occurs!(ev_ctx, 20., Ok(Event::FileLoaded));
+    assert_event_occurs!(ev_ctx, 20., Ok(Event::AudioReconfig));
+    assert_event_occurs!(ev_ctx, 20., Ok(Event::VideoReconfig));
+    assert_event_occurs!(ev_ctx, 20., Ok(Event::VideoReconfig));
+    assert_event_occurs!(ev_ctx, 20., Ok(Event::PlaybackRestart));
     assert!(ev_ctx.wait_event(3.).is_none());
 
     mpv.playlist_load_files(&[(
@@ -146,6 +129,9 @@ fn events() {
         None,
     )])
     .unwrap();
+    assert_event_occurs!(ev_ctx, 3., Ok(Event::AudioReconfig));
+    assert_event_occurs!(ev_ctx, 3., Ok(Event::VideoReconfig));
+    assert_event_occurs!(ev_ctx, 10., Ok(Event::EndFile(_)));
     assert_event_occurs!(ev_ctx, 10., Ok(Event::StartFile));
     assert_event_occurs!(
         ev_ctx,
@@ -158,7 +144,9 @@ fn events() {
     );
     assert_event_occurs!(ev_ctx, 3., Ok(Event::AudioReconfig));
     assert_event_occurs!(ev_ctx, 3., Ok(Event::AudioReconfig));
+    assert_event_occurs!(ev_ctx, 3., Ok(Event::VideoReconfig));
     assert_event_occurs!(ev_ctx, 3., Ok(Event::FileLoaded));
+    assert_event_occurs!(ev_ctx, 3., Ok(Event::AudioReconfig));
     assert_event_occurs!(ev_ctx, 3., Ok(Event::AudioReconfig));
     assert_event_occurs!(ev_ctx, 3., Ok(Event::PlaybackRestart));
     assert!(ev_ctx.wait_event(3.).is_none());

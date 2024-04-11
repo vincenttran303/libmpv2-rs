@@ -1,26 +1,8 @@
-// Copyright (C) 2016  ParadoxSpiral
-//
-// This file is part of libmpv-rs.
-//
-// This library is free software; you can redistribute it and/or
-// modify it under the terms of the GNU Lesser General Public
-// License as published by the Free Software Foundation; either
-// version 2.1 of the License, or (at your option) any later version.
-//
-// This library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-// Lesser General Public License for more details.
-//
-// You should have received a copy of the GNU Lesser General Public
-// License along with this library; if not, write to the Free Software
-// Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
-
-use libmpv::{events::*, *};
+use libmpv2::{events::*, *};
 
 use std::{collections::HashMap, env, thread, time::Duration};
 
-const VIDEO_URL: &str = "https://www.youtube.com/watch?v=DLzxrzFCyOs";
+const VIDEO_URL: &str = "test-data/jellyfish.mp4";
 
 fn main() -> Result<()> {
     let path = env::args()
@@ -32,7 +14,7 @@ fn main() -> Result<()> {
     mpv.set_property("volume", 15)?;
     mpv.set_property("vo", "null")?;
 
-    let mut ev_ctx = mpv.create_event_context();
+    let mut ev_ctx = EventContext::new(mpv.ctx);
     ev_ctx.disable_deprecated_events()?;
     ev_ctx.observe_property("volume", Format::Int64, 0)?;
     ev_ctx.observe_property("demuxer-cache-state", Format::Node, 0)?;

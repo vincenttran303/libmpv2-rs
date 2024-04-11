@@ -1,73 +1,31 @@
-// Copyright (C) 2016  ParadoxSpiral
-//
-// This file is part of libmpv-rs.
-//
-// This library is free software; you can redistribute it and/or
-// modify it under the terms of the GNU Lesser General Public
-// License as published by the Free Software Foundation; either
-// version 2.1 of the License, or (at your option) any later version.
-//
-// This library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-// Lesser General Public License for more details.
-//
-// You should have received a copy of the GNU Lesser General Public
-// License along with this library; if not, write to the Free Software
-// Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
-
-use libmpv_sys::mpv_event;
-
 use crate::{mpv::mpv_err, *};
 
-use std::ffi::CString;
-use std::marker::PhantomData;
+use std::ffi::{c_void, CString};
 use std::os::raw as ctype;
 use std::ptr::NonNull;
 use std::slice;
-use std::sync::atomic::Ordering;
 
 /// An `Event`'s ID.
-pub use libmpv_sys::mpv_event_id as EventId;
+pub use libmpv2_sys::mpv_event_id as EventId;
 pub mod mpv_event_id {
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_AUDIO_RECONFIG as AudioReconfig;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_CLIENT_MESSAGE as ClientMessage;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_COMMAND_REPLY as CommandReply;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_END_FILE as EndFile;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_FILE_LOADED as FileLoaded;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_GET_PROPERTY_REPLY as GetPropertyReply;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_HOOK as Hook;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_LOG_MESSAGE as LogMessage;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_NONE as None;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_PLAYBACK_RESTART as PlaybackRestart;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_PROPERTY_CHANGE as PropertyChange;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_QUEUE_OVERFLOW as QueueOverflow;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_SEEK as Seek;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_SET_PROPERTY_REPLY as SetPropertyReply;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_SHUTDOWN as Shutdown;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_START_FILE as StartFile;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_TICK as Tick;
-    pub use libmpv_sys::mpv_event_id_MPV_EVENT_VIDEO_RECONFIG as VideoReconfig;
-}
-
-impl Mpv {
-    /// Create a context that can be used to wait for events and control which events are listened
-    /// for.
-    ///
-    /// # Panics
-    /// Panics if a context already exists
-    pub fn create_event_context(&self) -> EventContext {
-        match self
-            .events_guard
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        {
-            Ok(_) => EventContext {
-                ctx: self.ctx,
-                _does_not_outlive: PhantomData::<&Self>,
-            },
-            Err(_) => panic!("Event context already exists"),
-        }
-    }
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_AUDIO_RECONFIG as AudioReconfig;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_CLIENT_MESSAGE as ClientMessage;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_COMMAND_REPLY as CommandReply;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_END_FILE as EndFile;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_FILE_LOADED as FileLoaded;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_GET_PROPERTY_REPLY as GetPropertyReply;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_HOOK as Hook;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_LOG_MESSAGE as LogMessage;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_NONE as None;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_PLAYBACK_RESTART as PlaybackRestart;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_PROPERTY_CHANGE as PropertyChange;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_QUEUE_OVERFLOW as QueueOverflow;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_SEEK as Seek;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_SET_PROPERTY_REPLY as SetPropertyReply;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_SHUTDOWN as Shutdown;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_START_FILE as StartFile;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_TICK as Tick;
+    pub use libmpv2_sys::mpv_event_id_MPV_EVENT_VIDEO_RECONFIG as VideoReconfig;
 }
 
 #[derive(Debug)]
@@ -147,22 +105,37 @@ pub enum Event<'a> {
     /// Received when the Event Queue is full
     QueueOverflow,
     /// A deprecated event
-    Deprecated(mpv_event),
+    Deprecated(libmpv2_sys::mpv_event),
+}
+
+unsafe extern "C" fn wu_wrapper<F: Fn() + Send + 'static>(ctx: *mut c_void) {
+    if ctx.is_null() {
+        panic!("ctx for wakeup wrapper is NULL");
+    }
+
+    (*(ctx as *mut F))();
 }
 
 /// Context to listen to events.
-pub struct EventContext<'parent> {
-    ctx: NonNull<libmpv_sys::mpv_handle>,
-    _does_not_outlive: PhantomData<&'parent Mpv>,
+pub struct EventContext {
+    ctx: NonNull<libmpv2_sys::mpv_handle>,
+    wakeup_callback_cleanup: Option<Box<dyn FnOnce()>>,
 }
 
-unsafe impl<'parent> Send for EventContext<'parent> {}
+unsafe impl Send for EventContext {}
 
-impl<'parent> EventContext<'parent> {
+impl EventContext {
+    pub fn new(ctx: NonNull<libmpv2_sys::mpv_handle>) -> Self {
+        EventContext {
+            ctx,
+            wakeup_callback_cleanup: None,
+        }
+    }
+
     /// Enable an event.
     pub fn enable_event(&self, ev: events::EventId) -> Result<()> {
         mpv_err((), unsafe {
-            libmpv_sys::mpv_request_event(self.ctx.as_ptr(), ev, 1)
+            libmpv2_sys::mpv_request_event(self.ctx.as_ptr(), ev, 1)
         })
     }
 
@@ -177,13 +150,13 @@ impl<'parent> EventContext<'parent> {
     /// Disable an event.
     pub fn disable_event(&self, ev: events::EventId) -> Result<()> {
         mpv_err((), unsafe {
-            libmpv_sys::mpv_request_event(self.ctx.as_ptr(), ev, 0)
+            libmpv2_sys::mpv_request_event(self.ctx.as_ptr(), ev, 0)
         })
     }
 
     /// Diable all deprecated events.
     pub fn disable_deprecated_events(&self) -> Result<()> {
-        self.disable_event(libmpv_sys::mpv_event_id_MPV_EVENT_IDLE)?;
+        self.disable_event(libmpv2_sys::mpv_event_id_MPV_EVENT_IDLE)?;
         Ok(())
     }
 
@@ -200,7 +173,7 @@ impl<'parent> EventContext<'parent> {
     pub fn observe_property(&self, name: &str, format: Format, id: u64) -> Result<()> {
         let name = CString::new(name)?;
         mpv_err((), unsafe {
-            libmpv_sys::mpv_observe_property(
+            libmpv2_sys::mpv_observe_property(
                 self.ctx.as_ptr(),
                 id,
                 name.as_ptr(),
@@ -212,7 +185,7 @@ impl<'parent> EventContext<'parent> {
     /// Unobserve any property associated with `id`.
     pub fn unobserve_property(&self, id: u64) -> Result<()> {
         mpv_err((), unsafe {
-            libmpv_sys::mpv_unobserve_property(self.ctx.as_ptr(), id)
+            libmpv2_sys::mpv_unobserve_property(self.ctx.as_ptr(), id)
         })
     }
 
@@ -225,7 +198,7 @@ impl<'parent> EventContext<'parent> {
     /// `MPV_EVENT_GET_PROPERTY_REPLY`, `MPV_EVENT_SET_PROPERTY_REPLY`, `MPV_EVENT_COMMAND_REPLY`,
     /// or `MPV_EVENT_PROPERTY_CHANGE` event failed, or if `MPV_EVENT_END_FILE` reported an error.
     pub fn wait_event(&mut self, timeout: f64) -> Option<Result<Event>> {
-        let event = unsafe { *libmpv_sys::mpv_wait_event(self.ctx.as_ptr(), timeout) };
+        let event = unsafe { *libmpv2_sys::mpv_wait_event(self.ctx.as_ptr(), timeout) };
         if event.event_id != mpv_event_id::None {
             if let Err(e) = mpv_err((), event.error) {
                 return Some(Err(e));
@@ -237,7 +210,7 @@ impl<'parent> EventContext<'parent> {
             mpv_event_id::Shutdown => Some(Ok(Event::Shutdown)),
             mpv_event_id::LogMessage => {
                 let log_message =
-                    unsafe { *(event.data as *mut libmpv_sys::mpv_event_log_message) };
+                    unsafe { *(event.data as *mut libmpv2_sys::mpv_event_log_message) };
 
                 let prefix = unsafe { mpv_cstr_to_str!(log_message.prefix) };
                 Some(prefix.and_then(|prefix| {
@@ -250,7 +223,7 @@ impl<'parent> EventContext<'parent> {
                 }))
             }
             mpv_event_id::GetPropertyReply => {
-                let property = unsafe { *(event.data as *mut libmpv_sys::mpv_event_property) };
+                let property = unsafe { *(event.data as *mut libmpv2_sys::mpv_event_property) };
 
                 let name = unsafe { mpv_cstr_to_str!(property.name) };
                 Some(name.and_then(|name| {
@@ -274,7 +247,7 @@ impl<'parent> EventContext<'parent> {
             )),
             mpv_event_id::StartFile => Some(Ok(Event::StartFile)),
             mpv_event_id::EndFile => {
-                let end_file = unsafe { *(event.data as *mut libmpv_sys::mpv_event_end_file) };
+                let end_file = unsafe { *(event.data as *mut libmpv2_sys::mpv_event_end_file) };
 
                 if let Err(e) = mpv_err((), end_file.error) {
                     Some(Err(e))
@@ -285,7 +258,7 @@ impl<'parent> EventContext<'parent> {
             mpv_event_id::FileLoaded => Some(Ok(Event::FileLoaded)),
             mpv_event_id::ClientMessage => {
                 let client_message =
-                    unsafe { *(event.data as *mut libmpv_sys::mpv_event_client_message) };
+                    unsafe { *(event.data as *mut libmpv2_sys::mpv_event_client_message) };
                 let messages = unsafe {
                     slice::from_raw_parts_mut(client_message.args, client_message.num_args as _)
                 };
@@ -302,7 +275,7 @@ impl<'parent> EventContext<'parent> {
             mpv_event_id::Seek => Some(Ok(Event::Seek)),
             mpv_event_id::PlaybackRestart => Some(Ok(Event::PlaybackRestart)),
             mpv_event_id::PropertyChange => {
-                let property = unsafe { *(event.data as *mut libmpv_sys::mpv_event_property) };
+                let property = unsafe { *(event.data as *mut libmpv2_sys::mpv_event_property) };
 
                 // This happens if the property is not available. For example,
                 // if you reached EndFile while observing a property.
@@ -325,6 +298,58 @@ impl<'parent> EventContext<'parent> {
             }
             mpv_event_id::QueueOverflow => Some(Ok(Event::QueueOverflow)),
             _ => Some(Ok(Event::Deprecated(event))),
+        }
+    }
+
+    /// Set a custom function that should be called when there are new events. Use this if
+    /// blocking in [wait_event](#method.wait_event) to wait for new events is not feasible.
+    ///
+    /// Keep in mind that the callback will be called from foreign threads. You must not make
+    /// any assumptions of the environment, and you must return as soon as possible (i.e. no
+    /// long blocking waits). Exiting the callback through any other means than a normal return
+    /// is forbidden (no throwing exceptions, no `longjmp()` calls). You must not change any
+    /// local thread state (such as the C floating point environment).
+    ///
+    /// You are not allowed to call any client API functions inside of the callback. In
+    /// particular, you should not do any processing in the callback, but wake up another
+    /// thread that does all the work. The callback is meant strictly for notification only,
+    /// and is called from arbitrary core parts of the player, that make no considerations for
+    /// reentrant API use or allowing the callee to spend a lot of time doing other things.
+    /// Keep in mind that it’s also possible that the callback is called from a thread while a
+    /// mpv API function is called (i.e. it can be reentrant).
+    ///
+    /// In general, the client API expects you to call [wait_event](#method.wait_event) to receive
+    /// notifications, and the wakeup callback is merely a helper utility to make this easier in
+    /// certain situations. Note that it’s possible that there’s only one wakeup callback
+    /// invocation for multiple events. You should call [wait_event](#method.wait_event) with no timeout until
+    /// `None` is returned, at which point the event queue is empty.
+    ///
+    /// If you actually want to do processing in a callback, spawn a thread that does nothing but
+    /// call [wait_event](#method.wait_event) in a loop and dispatches the result to a callback.
+    ///
+    /// Only one wakeup callback can be set.
+    pub fn set_wakeup_callback<F: Fn() + Send + 'static>(&mut self, callback: F) {
+        if let Some(wakeup_callback_cleanup) = self.wakeup_callback_cleanup.take() {
+            wakeup_callback_cleanup();
+        }
+        let raw_callback = Box::into_raw(Box::new(callback));
+        self.wakeup_callback_cleanup = Some(Box::new(move || unsafe {
+            drop(Box::from_raw(raw_callback));
+        }) as Box<dyn FnOnce()>);
+        unsafe {
+            libmpv2_sys::mpv_set_wakeup_callback(
+                self.ctx.as_ptr(),
+                Some(wu_wrapper::<F>),
+                raw_callback as *mut c_void,
+            );
+        }
+    }
+}
+
+impl Drop for EventContext {
+    fn drop(&mut self) {
+        if let Some(wakeup_callback_cleanup) = self.wakeup_callback_cleanup.take() {
+            wakeup_callback_cleanup();
         }
     }
 }

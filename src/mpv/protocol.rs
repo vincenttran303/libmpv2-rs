@@ -1,31 +1,10 @@
-// Copyright (C) 2016  ParadoxSpiral
-//
-// This file is part of mpv-rs.
-//
-// This library is free software; you can redistribute it and/or
-// modify it under the terms of the GNU Lesser General Public
-// License as published by the Free Software Foundation; either
-// version 2.1 of the License, or (at your option) any later version.
-//
-// This library is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-// Lesser General Public License for more details.
-//
-// You should have received a copy of the GNU Lesser General Public
-// License along with this library; if not, write to the Free Software
-// Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
-
 use super::*;
 
 use std::alloc::{self, Layout};
-use std::ffi::CString;
-use std::marker::PhantomData;
 use std::mem;
 use std::os::raw as ctype;
 use std::panic;
 use std::panic::RefUnwindSafe;
-use std::ptr::{self, NonNull};
 use std::slice;
 use std::sync::{atomic::Ordering, Mutex};
 
@@ -67,7 +46,7 @@ pub type StreamSize<T> = fn(&mut T) -> i64;
 unsafe extern "C" fn open_wrapper<T, U>(
     user_data: *mut ctype::c_void,
     uri: *mut ctype::c_char,
-    info: *mut libmpv_sys::mpv_stream_cb_info,
+    info: *mut libmpv2_sys::mpv_stream_cb_info,
 ) -> ctype::c_int
 where
     T: RefUnwindSafe,
@@ -182,7 +161,7 @@ struct ProtocolData<T, U> {
 /// This context holds state relevant to custom protocols.
 /// It is created by calling `Mpv::create_protocol_context`.
 pub struct ProtocolContext<'parent, T: RefUnwindSafe, U: RefUnwindSafe> {
-    ctx: NonNull<libmpv_sys::mpv_handle>,
+    ctx: NonNull<libmpv2_sys::mpv_handle>,
     protocols: Mutex<Vec<Protocol<T, U>>>,
     _does_not_outlive: PhantomData<&'parent Mpv>,
 }
@@ -192,7 +171,7 @@ unsafe impl<'parent, T: RefUnwindSafe, U: RefUnwindSafe> Sync for ProtocolContex
 
 impl<'parent, T: RefUnwindSafe, U: RefUnwindSafe> ProtocolContext<'parent, T, U> {
     fn new(
-        ctx: NonNull<libmpv_sys::mpv_handle>,
+        ctx: NonNull<libmpv2_sys::mpv_handle>,
         marker: PhantomData<&'parent Mpv>,
     ) -> ProtocolContext<'parent, T, U> {
         ProtocolContext {
@@ -254,12 +233,12 @@ impl<T: RefUnwindSafe, U: RefUnwindSafe> Protocol<T, U> {
         Protocol { name, data }
     }
 
-    fn register(&self, ctx: *mut libmpv_sys::mpv_handle) -> Result<()> {
+    fn register(&self, ctx: *mut libmpv2_sys::mpv_handle) -> Result<()> {
         let name = CString::new(&self.name[..])?;
         unsafe {
             mpv_err(
                 (),
-                libmpv_sys::mpv_stream_cb_add_ro(
+                libmpv2_sys::mpv_stream_cb_add_ro(
                     ctx,
                     name.as_ptr(),
                     self.data as *mut _,
