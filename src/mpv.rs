@@ -1,5 +1,3 @@
-use std::marker::PhantomData;
-
 macro_rules! mpv_cstr_to_str {
     ($cstr: expr) => {
         std::ffi::CStr::from_ptr($cstr)
@@ -29,6 +27,7 @@ use std::{
     ops::Deref,
     os::raw as ctype,
     ptr::{self, NonNull},
+    rc::Rc,
     sync::atomic::AtomicBool,
 };
 
@@ -81,53 +80,129 @@ unsafe impl GetData for i64 {
     }
 }
 
-#[derive(Debug)]
-pub enum MpvNodeValue<'a> {
-    String(&'a str),
+#[derive(Debug, Clone)]
+pub enum MpvNode {
+    String(String),
     Flag(bool),
     Int64(i64),
     Double(f64),
-    Array(MpvNodeArrayIter<'a>),
-    Map(MpvNodeMapIter<'a>),
+    ArrayIter(MpvNodeArrayIter),
+    MapIter(MpvNodeMapIter),
     None,
 }
 
-#[derive(Debug)]
-pub struct MpvNodeArrayIter<'parent> {
-    curr: i32,
-    list: libmpv2_sys::mpv_node_list,
-    _does_not_outlive: PhantomData<&'parent MpvNode>,
-}
-
-impl Iterator for MpvNodeArrayIter<'_> {
-    type Item = MpvNode;
-
-    fn next(&mut self) -> Option<MpvNode> {
-        if self.curr >= self.list.num {
-            None
+impl MpvNode {
+    pub fn bool(&self) -> Option<bool> {
+        if let MpvNode::Flag(value) = *self {
+            Some(value)
         } else {
-            let offset = self.curr.try_into().ok()?;
-            self.curr += 1;
-            Some(MpvNode(unsafe { *self.list.values.offset(offset) }))
+            None
+        }
+    }
+    pub fn i64(&self) -> Option<i64> {
+        if let MpvNode::Int64(value) = *self {
+            Some(value)
+        } else {
+            None
+        }
+    }
+    pub fn f64(&self) -> Option<f64> {
+        if let MpvNode::Double(value) = *self {
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    pub fn str(&self) -> Option<&str> {
+        if let MpvNode::String(value) = self {
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    pub fn array(self) -> Option<MpvNodeArrayIter> {
+        if let MpvNode::ArrayIter(value) = self {
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    pub fn map(self) -> Option<MpvNodeMapIter> {
+        if let MpvNode::MapIter(value) = self {
+            Some(value)
+        } else {
+            None
         }
     }
 }
 
-#[derive(Debug)]
-pub struct MpvNodeMapIter<'parent> {
-    curr: i32,
-    list: libmpv2_sys::mpv_node_list,
-    _does_not_outlive: PhantomData<&'parent MpvNode>,
+impl PartialEq for MpvNode {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::String(l0), Self::String(r0)) => l0 == r0,
+            (Self::Flag(l0), Self::Flag(r0)) => l0 == r0,
+            (Self::Int64(l0), Self::Int64(r0)) => l0 == r0,
+            (Self::Double(l0), Self::Double(r0)) => l0 == r0,
+            (Self::ArrayIter(l0), Self::ArrayIter(r0)) => l0.clone().eq(r0.clone()),
+            (Self::MapIter(l0), Self::MapIter(r0)) => l0.clone().eq(r0.clone()),
+            _ => core::mem::discriminant(self) == core::mem::discriminant(other),
+        }
+    }
 }
 
-impl<'parent> Iterator for MpvNodeMapIter<'parent> {
-    type Item = (&'parent str, MpvNode);
+#[derive(Debug, Clone)]
+pub struct MpvNodeArrayIter {
+    // Reference counted pointer to a parent node so it stays alive long enough.
+    //
+    // MPV has one big cleanup function that takes a node so store the parent node
+    // and force it to stay alive until the reference count hits 0.
+    node: Rc<DropWrapper>,
+    start: *const libmpv2_sys::mpv_node,
+    end: *const libmpv2_sys::mpv_node,
+}
 
-    fn next(&mut self) -> Option<(&'parent str, MpvNode)> {
-        if self.curr >= self.list.num {
+impl Iterator for MpvNodeArrayIter {
+    type Item = MpvNode;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.start == self.end {
             None
         } else {
-            let offset = self.curr.try_into().ok()?;
+            unsafe {
+                let result = ptr::read(self.start);
+                let node = SysMpvNode {
+                    parent: Rc::clone(&self.node),
+                    node: result,
+                };
+                self.start = self.start.offset(1);
+                node.value().ok()
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MpvNodeMapIter {
+    // Reference counted pointer to a parent node so it stays alive long enough.
+    //
+    // MPV has one big cleanup function that takes a node so store the parent node
+    // and force it to stay alive until the reference count hits 0.
+    node: Rc<DropWrapper>,
+    list: libmpv2_sys::mpv_node_list,
+    curr: usize,
+}
+
+impl Iterator for MpvNodeMapIter {
+    type Item = (String, MpvNode);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.curr >= self.list.num.try_into().unwrap() {
+            None
+        } else {
+            let offset = self.curr.try_into().unwrap();
             let (key, value) = unsafe {
                 (
                     mpv_cstr_to_str!(*self.list.keys.offset(offset)),
@@ -135,106 +210,64 @@ impl<'parent> Iterator for MpvNodeMapIter<'parent> {
                 )
             };
             self.curr += 1;
-            Some((key.ok()?, MpvNode(value)))
+            let node = SysMpvNode {
+                parent: Rc::clone(&self.node),
+                node: value,
+            };
+            Some((key.unwrap().to_string(), node.value().unwrap()))
         }
     }
 }
 
+// Rust doesn't allow implementing external traits directly on external structs so wrapper is required
 #[derive(Debug)]
-pub struct MpvNode(libmpv2_sys::mpv_node);
+struct DropWrapper(libmpv2_sys::mpv_node);
 
-impl Drop for MpvNode {
+impl Drop for DropWrapper {
     fn drop(&mut self) {
         unsafe { libmpv2_sys::mpv_free_node_contents(&mut self.0 as *mut libmpv2_sys::mpv_node) };
     }
 }
 
-impl MpvNode {
-    pub fn value(&self) -> Result<MpvNodeValue<'_>> {
-        let node = self.0;
-        Ok(match node.format {
-            mpv_format::Flag => MpvNodeValue::Flag(unsafe { node.u.flag } == 1),
-            mpv_format::Int64 => MpvNodeValue::Int64(unsafe { node.u.int64 }),
-            mpv_format::Double => MpvNodeValue::Double(unsafe { node.u.double_ }),
-            mpv_format::String => {
-                let text = unsafe { mpv_cstr_to_str!(node.u.string) }?;
-                MpvNodeValue::String(text)
-            }
-
-            mpv_format::Array => MpvNodeValue::Array(MpvNodeArrayIter {
-                list: unsafe { *node.u.list },
-                curr: 0,
-                _does_not_outlive: PhantomData,
-            }),
-
-            mpv_format::Map => MpvNodeValue::Map(MpvNodeMapIter {
-                list: unsafe { *node.u.list },
-                curr: 0,
-                _does_not_outlive: PhantomData,
-            }),
-            mpv_format::None => MpvNodeValue::None,
-            _ => return Err(Error::Raw(mpv_error::PropertyError)),
-        })
-    }
-
-    pub fn to_bool(&self) -> Option<bool> {
-        if let MpvNodeValue::Flag(value) = self.value().ok()? {
-            Some(value)
-        } else {
-            None
-        }
-    }
-    pub fn to_i64(&self) -> Option<i64> {
-        if let MpvNodeValue::Int64(value) = self.value().ok()? {
-            Some(value)
-        } else {
-            None
-        }
-    }
-    pub fn to_f64(&self) -> Option<f64> {
-        if let MpvNodeValue::Double(value) = self.value().ok()? {
-            Some(value)
-        } else {
-            None
-        }
-    }
-
-    pub fn to_str(&self) -> Option<&str> {
-        if let MpvNodeValue::String(value) = self.value().ok()? {
-            Some(value)
-        } else {
-            None
-        }
-    }
-
-    pub fn to_array(&self) -> Option<MpvNodeArrayIter<'_>> {
-        if let MpvNodeValue::Array(value) = self.value().ok()? {
-            Some(value)
-        } else {
-            None
-        }
-    }
-
-    pub fn to_map(&self) -> Option<MpvNodeMapIter<'_>> {
-        if let MpvNodeValue::Map(value) = self.value().ok()? {
-            Some(value)
-        } else {
-            None
-        }
-    }
+#[derive(Debug)]
+struct SysMpvNode {
+    // Reference counted pointer to a parent node so it stays alive long enough.
+    //
+    // MPV has one big cleanup function that takes a node so store the parent node
+    // and force it to stay alive until the reference count hits 0.
+    parent: Rc<DropWrapper>,
+    node: libmpv2_sys::mpv_node,
 }
 
-unsafe impl GetData for MpvNode {
-    fn get_from_c_void<T, F: FnMut(*mut ctype::c_void) -> Result<T>>(
-        mut fun: F,
-    ) -> Result<MpvNode> {
-        let mut val = MaybeUninit::uninit();
-        let _ = fun(val.as_mut_ptr() as *mut _)?;
-        Ok(MpvNode(unsafe { val.assume_init() }))
-    }
+impl SysMpvNode {
+    pub fn value(&self) -> Result<MpvNode> {
+        let node = self.node;
+        Ok(match node.format {
+            mpv_format::Flag => MpvNode::Flag(unsafe { node.u.flag } == 1),
+            mpv_format::Int64 => MpvNode::Int64(unsafe { node.u.int64 }),
+            mpv_format::Double => MpvNode::Double(unsafe { node.u.double_ }),
+            mpv_format::String => {
+                let text = unsafe { mpv_cstr_to_str!(node.u.string) }?.to_owned();
+                MpvNode::String(text)
+            }
+            mpv_format::Array => {
+                let list = unsafe { *node.u.list };
+                let iter = MpvNodeArrayIter {
+                    node: Rc::clone(&self.parent),
+                    start: unsafe { *node.u.list }.values,
+                    end: unsafe { list.values.offset(list.num.try_into().unwrap()) },
+                };
+                return Ok(MpvNode::ArrayIter(iter));
+            }
 
-    fn get_format() -> Format {
-        Format::Node
+            mpv_format::Map => MpvNode::MapIter(MpvNodeMapIter {
+                list: unsafe { *node.u.list },
+                curr: 0,
+                node: Rc::clone(&self.parent),
+            }),
+            mpv_format::None => MpvNode::None,
+            _ => return Err(Error::Raw(mpv_error::PropertyError)),
+        })
     }
 }
 
@@ -261,10 +294,27 @@ unsafe impl SetData for bool {
     }
 }
 
+unsafe impl GetData for MpvNode {
+    fn get_from_c_void<T, F: FnMut(*mut ctype::c_void) -> Result<T>>(mut fun: F) -> Result<Self> {
+        let mut val = MaybeUninit::uninit();
+        fun(val.as_mut_ptr() as *mut _)?;
+        let sys_node = unsafe { val.assume_init() };
+        let node = SysMpvNode {
+            parent: Rc::new(DropWrapper(sys_node)),
+            node: sys_node,
+        };
+        node.value()
+    }
+
+    fn get_format() -> Format {
+        Format::Node
+    }
+}
+
 unsafe impl GetData for String {
     fn get_from_c_void<T, F: FnMut(*mut ctype::c_void) -> Result<T>>(mut fun: F) -> Result<String> {
         let ptr = &mut ptr::null();
-        let _ = fun(ptr as *mut *const ctype::c_char as _)?;
+        fun(ptr as *mut *const ctype::c_char as _)?;
 
         let ret = unsafe { mpv_cstr_to_str!(*ptr) }?.to_owned();
         unsafe { libmpv2_sys::mpv_free(*ptr as *mut _) };
@@ -351,15 +401,18 @@ impl Format {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 /// How a `File` is inserted into the playlist.
+/// See [flags](https://mpv.io/manual/stable/#command-interface-[%3Coptions%3E]]])
 pub enum FileState {
-    /// Replace the current track.
+    #[default]
     Replace,
-    /// Append to the current playlist.
     Append,
-    /// If current playlist is empty: play, otherwise append to playlist.
     AppendPlay,
+    InsertNext,
+    InsertNextPlay,
+    InsertAt,
+    InsertAtPlay,
 }
 
 impl FileState {
@@ -368,6 +421,10 @@ impl FileState {
             FileState::Replace => "replace",
             FileState::Append => "append",
             FileState::AppendPlay => "append-play",
+            FileState::InsertNext => "insert-next",
+            FileState::InsertNextPlay => "insert-next-play",
+            FileState::InsertAt => "insert-at",
+            FileState::InsertAtPlay => "insert-at-play",
         }
     }
 }
@@ -563,9 +620,7 @@ impl Mpv {
     //
 
     /// Seek forward relatively from current position in seconds.
-    /// This is less exact than `seek_absolute`, see [mpv manual]
-    /// (https://mpv.io/manual/master/#command-interface-
-    /// [relative|absolute|absolute-percent|relative-percent|exact|keyframes]).
+    /// This is less exact than `seek_absolute`, see [mpv manual](https://mpv.io/manual/master/#command-interface-[relative|absolute|absolute-percent|relative-percent|exact|keyframes]).
     pub fn seek_forward(&self, secs: ctype::c_double) -> Result<()> {
         self.command("seek", &[&format!("{}", secs), "relative"])
     }
@@ -620,7 +675,7 @@ impl Mpv {
     /// "Save the video image, in its original resolution, and with subtitles.
     /// Some video outputs may still include the OSD in the output under certain circumstances.".
     ///
-    /// "[O]ptionally save it to a given file. The format of the file will be
+    /// "\[O\]ptionally save it to a given file. The format of the file will be
     /// guessed by the extension (and --screenshot-format is ignored - the behaviour when the
     /// extension is missing or unknown is arbitrary). If the file already exists, it's overwritten.
     /// Like all input command parameters, the filename is subject to property expansion as
@@ -679,33 +734,123 @@ impl Mpv {
         self.command("playlist-prev", &["force"])
     }
 
-    /// The given files are loaded sequentially, returning the index of the current file
-    /// and the error in case of an error. [More information.](https://mpv.io/manual/master/#command-interface-[replace|append|append-play)
-    ///
-    /// # Arguments
-    /// The `files` tuple slice consists of:
-    ///     * a string slice - the path
-    ///     * a `FileState` - how the file will be opened
-    ///     * an optional string slice - any additional options that will be set for this file
+    /// Stop playback of the current file, and play the new file immediately.
+    /// [More information.](https://mpv.io/manual/stable/#command-interface-[%3Coptions%3E]]])
     ///
     /// # Peculiarities
     /// `loadfile` is kind of asynchronous, any additional option is set during loading,
     /// [specifics](https://github.com/mpv-player/mpv/issues/4089).
-    pub fn playlist_load_files(&self, files: &[(&str, FileState, Option<&str>)]) -> Result<()> {
-        for (i, elem) in files.iter().enumerate() {
-            let args = elem.2.unwrap_or("");
+    pub fn loadfile_replace(&self, url: &str, options: Option<&str>) -> Result<()> {
+        let args = options.unwrap_or_default();
 
-            let ret = self.command(
-                "loadfile",
-                &[&format!("\"{}\"", elem.0), elem.1.val(), args],
-            );
+        let ret = self.command(
+            "loadfile",
+            &[&format!("\"{}\"", url), FileState::Replace.val(), "0", args],
+        );
 
-            if let Err(err) = ret {
-                return Err(Error::Loadfiles {
-                    index: i,
-                    error: ::std::rc::Rc::new(err),
-                });
-            }
+        if let Err(err) = ret {
+            return Err(Error::Loadfile {
+                error: ::std::rc::Rc::new(err),
+            });
+        }
+        Ok(())
+    }
+
+    /// Append the file to the playlist. Optionally play the file immediately if nothing else is playing.
+    /// [More information.](https://mpv.io/manual/stable/#command-interface-[%3Coptions%3E]]])
+    ///
+    /// # Peculiarities
+    /// `loadfile` is kind of asynchronous, any additional option is set during loading,
+    /// [specifics](https://github.com/mpv-player/mpv/issues/4089).
+    pub fn loadfile_append(&self, url: &str, play: bool, options: Option<&str>) -> Result<()> {
+        let args = options.unwrap_or_default();
+
+        let ret = self.command(
+            "loadfile",
+            &[
+                &format!("\"{}\"", url),
+                if play {
+                    FileState::AppendPlay.val()
+                } else {
+                    FileState::Append.val()
+                },
+                "0",
+                args,
+            ],
+        );
+
+        if let Err(err) = ret {
+            return Err(Error::Loadfile {
+                error: ::std::rc::Rc::new(err),
+            });
+        }
+        Ok(())
+    }
+
+    /// Insert the file into the playlist, directly after the current entry. Optionally play the file immediately if nothing else is playing.
+    /// [More information.](https://mpv.io/manual/stable/#command-interface-[%3Coptions%3E]]])
+    ///
+    /// # Peculiarities
+    /// `loadfile` is kind of asynchronous, any additional option is set during loading,
+    /// [specifics](https://github.com/mpv-player/mpv/issues/4089).
+    pub fn loadfile_insert_next(&self, url: &str, play: bool, options: Option<&str>) -> Result<()> {
+        let args = options.unwrap_or_default();
+
+        let ret = self.command(
+            "loadfile",
+            &[
+                &format!("\"{}\"", url),
+                if play {
+                    FileState::InsertNextPlay.val()
+                } else {
+                    FileState::InsertNext.val()
+                },
+                "0",
+                args,
+            ],
+        );
+
+        if let Err(err) = ret {
+            return Err(Error::Loadfile {
+                error: ::std::rc::Rc::new(err),
+            });
+        }
+        Ok(())
+    }
+
+    /// Insert the file into the playlist, at the index given. Optionally play the file immediately if nothing else is playing.
+    /// [More information.](https://mpv.io/manual/stable/#command-interface-[%3Coptions%3E]]])
+    ///
+    /// # Peculiarities
+    /// `loadfile` is kind of asynchronous, any additional option is set during loading,
+    /// [specifics](https://github.com/mpv-player/mpv/issues/4089).    
+    pub fn loadfile_insert_at(
+        &self,
+        url: &str,
+        play: bool,
+        index: i32,
+        options: Option<&str>,
+    ) -> Result<()> {
+        let args = options.unwrap_or_default();
+
+        let ret = self.command(
+            "loadfile",
+            &[
+                &format!("\"{}\"", url),
+                if play {
+                    FileState::InsertAtPlay.val()
+                } else {
+                    FileState::InsertAt.val()
+                },
+                &index.to_string(),
+                args,
+            ],
+        );
+
+        if let Err(err) = ret {
+            return Err(Error::Loadfile {
+                error: ::std::rc::Rc::new(err),
+            });
         }
         Ok(())
     }
@@ -793,7 +938,7 @@ impl Mpv {
 
     /// See `AddSelect`. "Select the subtitle. If a subtitle with the same file name was
     /// already added, that one is selected, instead of loading a duplicate entry.
-    /// (In this case, title/language are ignored, and if the [sub] was changed since it was loaded,
+    /// (In this case, title/language are ignored, and if the \[sub\] was changed since it was loaded,
     /// these changes won't be reflected.)".
     pub fn subtitle_add_cached(&self, path: &str) -> Result<()> {
         self.command("sub-add", &[&format!("\"{}\"", path), "cached"])
@@ -836,5 +981,113 @@ impl Mpv {
     /// See `SeekForward`.
     pub fn subtitle_seek_backward(&self) -> Result<()> {
         self.command("sub-seek", &["-1"])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    #[test]
+    fn playlist_one() -> Result<()> {
+        let mpv = Mpv::new().unwrap();
+        mpv.set_property("vo", "null").unwrap();
+        mpv.set_property("ao", "null").unwrap();
+
+        mpv.loadfile_replace("test-data/jellyfish.mp4", None)
+            .unwrap();
+
+        let expected_file = HashMap::from([
+            (String::from("id"), MpvNode::Int64(1)),
+            (
+                String::from("filename"),
+                MpvNode::String(String::from("test-data/jellyfish.mp4")),
+            ),
+            (String::from("current"), MpvNode::Flag(true)),
+        ]);
+
+        let mut playlist = mpv
+            .get_property::<MpvNode>("playlist")
+            .unwrap()
+            .array()
+            .unwrap()
+            .collect::<Vec<_>>();
+
+        let file = playlist
+            .pop()
+            .unwrap()
+            .map()
+            .unwrap()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(file, expected_file);
+
+        Ok(())
+    }
+
+    #[test]
+    fn playlist_multi() -> Result<()> {
+        let mpv = Mpv::new().unwrap();
+        mpv.set_property("vo", "null").unwrap();
+        mpv.set_property("ao", "null").unwrap();
+
+        mpv.loadfile_replace("test-data/jellyfish.mp4", None)?;
+        mpv.loadfile_append("test-data/speech_12kbps_mb.wav", false, None)?;
+        mpv.loadfile_insert_at("test-data/jellyfish.mp4", false, 1, None)?;
+
+        let expected_0 = HashMap::from([
+            (String::from("id"), MpvNode::Int64(1)),
+            (
+                String::from("filename"),
+                MpvNode::String(String::from("test-data/jellyfish.mp4")),
+            ),
+            (String::from("current"), MpvNode::Flag(true)),
+        ]);
+
+        let expected_1 = HashMap::from([
+            (String::from("id"), MpvNode::Int64(3)),
+            (
+                String::from("filename"),
+                MpvNode::String(String::from("test-data/jellyfish.mp4")),
+            ),
+        ]);
+
+        let expected_2 = HashMap::from([
+            (String::from("id"), MpvNode::Int64(2)),
+            (
+                String::from("filename"),
+                MpvNode::String(String::from("test-data/speech_12kbps_mb.wav")),
+            ),
+        ]);
+
+        let playlist = mpv
+            .get_property::<MpvNode>("playlist")
+            .unwrap()
+            .array()
+            .unwrap()
+            .collect::<Vec<_>>();
+
+        let file_1 = playlist[0]
+            .clone()
+            .map()
+            .unwrap()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(file_1, expected_0);
+
+        let file_2 = playlist[1]
+            .clone()
+            .map()
+            .unwrap()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(file_2, expected_1);
+
+        let file_3 = playlist[2]
+            .clone()
+            .map()
+            .unwrap()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(file_3, expected_2);
+        Ok(())
     }
 }

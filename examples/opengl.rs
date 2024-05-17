@@ -1,6 +1,6 @@
 use libmpv2::{
     render::{OpenGLInitParams, RenderContext, RenderParam, RenderParamApiType},
-    FileState, Mpv,
+    Mpv,
 };
 use std::{env, ffi::c_void};
 
@@ -57,8 +57,7 @@ fn main() {
                 .unwrap();
         });
         let render_context = Some(render_context);
-        mpv.playlist_load_files(&[(&path, FileState::AppendPlay, None)])
-            .unwrap();
+        mpv.loadfile_append(&path, true, None).unwrap();
 
         'render: loop {
             for event in events_loop.poll_iter() {

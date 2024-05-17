@@ -1,3 +1,4 @@
+use crate::mpv::SysMpvNode;
 use crate::{mpv::mpv_err, *};
 
 use std::ffi::{c_void, CString};
@@ -36,7 +37,7 @@ pub enum PropertyData<'a> {
     Flag(bool),
     Int64(i64),
     Double(ctype::c_double),
-    Node(&'a MpvNode),
+    Node(MpvNode),
 }
 
 impl<'a> PropertyData<'a> {
@@ -56,7 +57,10 @@ impl<'a> PropertyData<'a> {
             }
             mpv_format::Double => Ok(PropertyData::Double(*(ptr as *mut f64))),
             mpv_format::Int64 => Ok(PropertyData::Int64(*(ptr as *mut i64))),
-            mpv_format::Node => Ok(PropertyData::Node(&*(ptr as *mut MpvNode))),
+            mpv_format::Node => {
+                let sys_node = &*(ptr as *mut SysMpvNode);
+                return Ok(PropertyData::Node(sys_node.value().unwrap()));
+            }
             mpv_format::None => unreachable!(),
             _ => unimplemented!(),
         }

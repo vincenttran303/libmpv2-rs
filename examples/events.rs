@@ -21,8 +21,7 @@ fn main() -> Result<()> {
 
     crossbeam::scope(|scope| {
         scope.spawn(|_| {
-            mpv.playlist_load_files(&[(&path, FileState::AppendPlay, None)])
-                .unwrap();
+            mpv.loadfile_append(&path, true, None).unwrap();
 
             thread::sleep(Duration::from_secs(3));
 
@@ -59,17 +58,15 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn seekable_ranges(demuxer_cache_state: &MpvNode) -> Option<Vec<(f64, f64)>> {
+fn seekable_ranges(demuxer_cache_state: MpvNode) -> Option<Vec<(f64, f64)>> {
     let mut res = Vec::new();
-    let props: HashMap<&str, MpvNode> = demuxer_cache_state.to_map()?.collect();
-    let ranges = props.get("seekable-ranges")?.to_array()?;
-
+    let props = demuxer_cache_state.map()?.collect::<HashMap<_, _>>();
+    let ranges = props.get("seekable-ranges")?.clone().array().unwrap();
     for node in ranges {
-        let range: HashMap<&str, MpvNode> = node.to_map()?.collect();
-        let start = range.get("start")?.to_f64()?;
-        let end = range.get("end")?.to_f64()?;
+        let range = node.map().unwrap().collect::<HashMap<_, _>>();
+        let start = range.get("start")?.f64().unwrap();
+        let end = range.get("end")?.f64().unwrap();
         res.push((start, end));
     }
-
     Some(res)
 }

@@ -1,6 +1,7 @@
 use super::*;
 
 use std::alloc::{self, Layout};
+use std::marker::PhantomData;
 use std::mem;
 use std::os::raw as ctype;
 use std::panic;

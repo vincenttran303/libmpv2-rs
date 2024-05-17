@@ -38,13 +38,8 @@ fn properties() {
         0.6,
         f64::round(subg * f64::powi(10.0, 4)) / f64::powi(10.0, 4)
     );
-
-    mpv.playlist_load_files(&[(
-        "test-data/speech_12kbps_mb.wav",
-        FileState::AppendPlay,
-        None,
-    )])
-    .unwrap();
+    mpv.loadfile_append("test-data/speech_12kbps_mb.wav", true, None)
+        .unwrap();
     thread::sleep(Duration::from_millis(250));
 
     let title: MpvStr = mpv.get_property("media-title").unwrap();
@@ -80,6 +75,9 @@ fn events() {
 
     mpv.set_property("vo", "null").unwrap();
 
+    // speed up playback so test finishes faster
+    mpv.set_property("speed", 100).unwrap();
+
     assert_event_occurs!(
         ev_ctx,
         3.,
@@ -101,8 +99,7 @@ fn events() {
         })
     );
     assert!(ev_ctx.wait_event(3.).is_none());
-
-    mpv.playlist_load_files(&[("test-data/jellyfish.mp4", FileState::AppendPlay, None)])
+    mpv.loadfile_append("test-data/jellyfish.mp4", true, None)
         .unwrap();
     assert_event_occurs!(ev_ctx, 10., Ok(Event::StartFile));
     assert_event_occurs!(
@@ -114,25 +111,19 @@ fn events() {
             reply_userdata: 1,
         })
     );
-    assert_event_occurs!(ev_ctx, 20., Ok(Event::AudioReconfig));
-    assert_event_occurs!(ev_ctx, 20., Ok(Event::AudioReconfig));
-    assert_event_occurs!(ev_ctx, 20., Ok(Event::FileLoaded));
-    assert_event_occurs!(ev_ctx, 20., Ok(Event::AudioReconfig));
-    assert_event_occurs!(ev_ctx, 20., Ok(Event::VideoReconfig));
-    assert_event_occurs!(ev_ctx, 20., Ok(Event::VideoReconfig));
-    assert_event_occurs!(ev_ctx, 20., Ok(Event::PlaybackRestart));
-    assert!(ev_ctx.wait_event(3.).is_none());
-
-    mpv.playlist_load_files(&[(
-        "test-data/speech_12kbps_mb.wav",
-        FileState::AppendPlay,
-        None,
-    )])
-    .unwrap();
+    assert_event_occurs!(ev_ctx, 3., Ok(Event::AudioReconfig));
+    assert_event_occurs!(ev_ctx, 3., Ok(Event::AudioReconfig));
+    assert_event_occurs!(ev_ctx, 3., Ok(Event::FileLoaded));
     assert_event_occurs!(ev_ctx, 3., Ok(Event::AudioReconfig));
     assert_event_occurs!(ev_ctx, 3., Ok(Event::VideoReconfig));
-    assert_event_occurs!(ev_ctx, 10., Ok(Event::EndFile(_)));
-    assert_event_occurs!(ev_ctx, 10., Ok(Event::StartFile));
+
+    mpv.loadfile_replace("test-data/speech_12kbps_mb.wav", None)
+        .unwrap();
+    assert_event_occurs!(ev_ctx, 3., Ok(Event::VideoReconfig));
+    assert_event_occurs!(ev_ctx, 3., Ok(Event::AudioReconfig));
+    assert_event_occurs!(ev_ctx, 3., Ok(Event::VideoReconfig));
+    assert_event_occurs!(ev_ctx, 3., Ok(Event::EndFile(mpv_end_file_reason::Stop)));
+    assert_event_occurs!(ev_ctx, 3., Ok(Event::StartFile));
     assert_event_occurs!(
         ev_ctx,
         3.,
@@ -149,6 +140,9 @@ fn events() {
     assert_event_occurs!(ev_ctx, 3., Ok(Event::AudioReconfig));
     assert_event_occurs!(ev_ctx, 3., Ok(Event::AudioReconfig));
     assert_event_occurs!(ev_ctx, 3., Ok(Event::PlaybackRestart));
+    assert_event_occurs!(ev_ctx, 3., Ok(Event::AudioReconfig));
+    assert_event_occurs!(ev_ctx, 10., Ok(Event::EndFile(mpv_end_file_reason::Eof)));
+    assert_event_occurs!(ev_ctx, 3., Ok(Event::AudioReconfig));
     assert!(ev_ctx.wait_event(3.).is_none());
 }
 
@@ -156,33 +150,29 @@ fn events() {
 fn node_map() -> Result<()> {
     let mpv = Mpv::new()?;
 
-    mpv.playlist_load_files(&[(
-        "test-data/speech_12kbps_mb.wav",
-        FileState::AppendPlay,
-        None,
-    )])?;
+    mpv.loadfile_append("test-data/speech_12kbps_mb.wav", true, None)
+        .unwrap();
 
     thread::sleep(Duration::from_millis(250));
-    let audio_params: MpvNode = mpv.get_property("audio-params")?;
-    let params: HashMap<&str, MpvNode> =
-        audio_params.to_map().ok_or_else(|| Error::Null)?.collect();
+    let audio_params = mpv.get_property::<MpvNode>("audio-params")?;
+    let params = audio_params.map().unwrap().collect::<HashMap<_, _>>();
 
     assert_eq!(params.len(), 5);
 
-    let format = params.get("format").unwrap().value()?;
-    assert!(matches!(format, MpvNodeValue::String("s16")));
+    let format = params.get("format").unwrap();
+    assert_eq!(format, &MpvNode::String("s16".to_string()));
 
-    let samplerate = params.get("samplerate").unwrap().value()?;
-    assert!(matches!(samplerate, MpvNodeValue::Int64(48_000)));
+    let samplerate = params.get("samplerate").unwrap();
+    assert_eq!(samplerate, &MpvNode::Int64(48_000));
 
-    let channels = params.get("channels").unwrap().value()?;
-    assert!(matches!(channels, MpvNodeValue::String("mono")));
+    let channels = params.get("channels").unwrap();
+    assert_eq!(channels, &MpvNode::String("mono".to_string()));
 
-    let hr_channels = params.get("hr-channels").unwrap().value()?;
-    assert!(matches!(hr_channels, MpvNodeValue::String("mono")));
+    let hr_channels = params.get("hr-channels").unwrap();
+    assert_eq!(hr_channels, &MpvNode::String("mono".to_string()));
 
-    let channel_count = params.get("channel-count").unwrap().value()?;
-    assert!(matches!(channel_count, MpvNodeValue::Int64(1)));
+    let channel_count = params.get("channel-count").unwrap();
+    assert_eq!(channel_count, &MpvNode::Int64(1));
 
     Ok(())
 }
@@ -191,25 +181,22 @@ fn node_map() -> Result<()> {
 fn node_array() -> Result<()> {
     let mpv = Mpv::new()?;
 
-    mpv.playlist_load_files(&[(
-        "test-data/speech_12kbps_mb.wav",
-        FileState::AppendPlay,
-        None,
-    )])?;
+    mpv.loadfile_append("test-data/speech_12kbps_mb.wav", true, None)
+        .unwrap();
 
     thread::sleep(Duration::from_millis(250));
-    let playlist: MpvNode = mpv.get_property("playlist")?;
-    let items: Vec<MpvNode> = playlist.to_array().ok_or_else(|| Error::Null)?.collect();
+    let playlist = mpv.get_property::<MpvNode>("playlist")?;
+    let items = playlist.array().unwrap().collect::<Vec<_>>();
 
     assert_eq!(items.len(), 1);
-    let track: HashMap<&str, MpvNode> = items[0].to_map().ok_or_else(|| Error::Null)?.collect();
+    let track = items[0].clone().map().unwrap().collect::<HashMap<_, _>>();
 
-    let filename = track.get("filename").unwrap().value()?;
+    let filename = track.get("filename").unwrap();
 
-    assert!(matches!(
+    assert_eq!(
         filename,
-        MpvNodeValue::String("test-data/speech_12kbps_mb.wav")
-    ));
+        &MpvNode::String("test-data/speech_12kbps_mb.wav".to_string())
+    );
 
     Ok(())
 }

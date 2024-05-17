@@ -5,8 +5,7 @@ pub type Result<T> = ::std::result::Result<T, Error>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Error {
-    Loadfiles {
-        index: usize,
+    Loadfile {
         error: Rc<Error>,
     },
     VersionMismatch {

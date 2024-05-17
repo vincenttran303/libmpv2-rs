@@ -17,6 +17,8 @@
 // - update MPV_CLIENT_API consts in lib.rs
 // - run tests and examples to test whether they still work
 
+#![allow(non_upper_case_globals)]
+
 use std::os::raw as ctype;
 
 pub const MPV_CLIENT_API_MAJOR: ctype::c_ulong = 2;
