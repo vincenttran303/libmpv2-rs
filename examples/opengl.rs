@@ -17,99 +17,93 @@ enum UserEvent {
 }
 
 fn main() {
-    unsafe {
-        let (window, mut events_loop, event_subsystem, video, _context) = create_sdl2_context();
+    let (window, mut events_loop, event_subsystem, video, _context) = create_sdl2_context();
 
-        let path = env::args()
-            .nth(1)
-            .unwrap_or_else(|| String::from(VIDEO_URL));
+    let path = env::args()
+        .nth(1)
+        .unwrap_or_else(|| String::from(VIDEO_URL));
 
-        let mut mpv = Mpv::new().expect("Error while creating MPV");
-        let mut render_context = RenderContext::new(
-            mpv.ctx.as_mut(),
-            vec![
-                RenderParam::ApiType(RenderParamApiType::OpenGl),
-                RenderParam::InitParams(OpenGLInitParams {
-                    get_proc_address,
-                    ctx: video,
-                }),
-            ],
-        )
-        .expect("Failed creating render context");
+    let mut mpv = Mpv::with_initializer(|init| {
+        init.set_property("vo", "libmpv")?;
+        Ok(())
+    })
+    .unwrap();
+    let mut render_context = RenderContext::new(
+        unsafe { mpv.ctx.as_mut() },
+        vec![
+            RenderParam::ApiType(RenderParamApiType::OpenGl),
+            RenderParam::InitParams(OpenGLInitParams {
+                get_proc_address,
+                ctx: video,
+            }),
+        ],
+    )
+    .expect("Failed creating render context");
 
-        event_subsystem
-            .register_custom_event::<UserEvent>()
+    event_subsystem
+        .register_custom_event::<UserEvent>()
+        .unwrap();
+
+    mpv.event_context_mut().disable_deprecated_events().unwrap();
+
+    let event_sender = event_subsystem.event_sender();
+    render_context.set_update_callback(move || {
+        println!("update callback");
+        event_sender
+            .push_custom_event(UserEvent::RedrawRequested)
             .unwrap();
+    });
 
-        mpv.event_context_mut().disable_deprecated_events().unwrap();
+    let event_sender = event_subsystem.event_sender();
+    mpv.event_context_mut().set_wakeup_callback(move || {
+        event_sender
+            .push_custom_event(UserEvent::MpvEventAvailable)
+            .unwrap();
+    });
+    mpv.loadfile_replace(&path, None).unwrap();
 
-        let event_sender = event_subsystem.event_sender();
-        render_context.set_update_callback(move || {
-            event_sender
-                .push_custom_event(UserEvent::RedrawRequested)
-                .unwrap();
-        });
+    'render: loop {
+        for event in events_loop.poll_iter() {
+            use sdl2::event::Event;
 
-        let event_sender = event_subsystem.event_sender();
-        mpv.event_context_mut().set_wakeup_callback(move || {
-            event_sender
-                .push_custom_event(UserEvent::MpvEventAvailable)
-                .unwrap();
-        });
-        let render_context = Some(render_context);
-        mpv.loadfile_append(&path, true, None).unwrap();
-
-        'render: loop {
-            for event in events_loop.poll_iter() {
-                use sdl2::event::Event;
-
-                if event.is_user_event() {
-                    let e2 = event.as_user_event_type::<UserEvent>().unwrap();
-                    match e2 {
-                        UserEvent::RedrawRequested => {
-                            if let Some(render_context) = &render_context {
-                                let (width, height) = window.drawable_size();
-                                render_context
-                                    .render::<sdl2::VideoSubsystem>(
-                                        0,
-                                        width as _,
-                                        height as _,
-                                        true,
-                                    )
-                                    .expect("Failed to draw on sdl2 window");
-                                window.gl_swap_window();
+            if event.is_user_event() {
+                match event.as_user_event_type::<UserEvent>().unwrap() {
+                    UserEvent::RedrawRequested => {
+                        let (width, height) = window.drawable_size();
+                        render_context
+                            .render::<sdl2::VideoSubsystem>(0, width as _, height as _, true)
+                            .expect("Failed to draw on sdl2 window");
+                        window.gl_swap_window();
+                    }
+                    UserEvent::MpvEventAvailable => loop {
+                        match mpv.event_context_mut().wait_event(0.0) {
+                            Some(Ok(libmpv2::events::Event::EndFile(_))) => {
+                                break 'render;
                             }
+                            Some(Ok(mpv_event)) => {
+                                eprintln!("MPV event: {:?}", mpv_event);
+                            }
+                            Some(Err(err)) => {
+                                eprintln!("MPV Error: {}", err);
+                                break 'render;
+                            }
+                            None => break,
                         }
-                        UserEvent::MpvEventAvailable => loop {
-                            match mpv.event_context_mut().wait_event(0.0) {
-                                Some(Ok(libmpv2::events::Event::EndFile(_))) => {
-                                    break 'render;
-                                }
-                                Some(Ok(mpv_event)) => {
-                                    eprintln!("MPV event: {:?}", mpv_event);
-                                }
-                                Some(Err(err)) => {
-                                    eprintln!("MPV Error: {}", err);
-                                    break 'render;
-                                }
-                                None => break,
-                            }
-                        },
-                    }
+                    },
                 }
+            }
 
-                match event {
-                    Event::Quit { .. } => {
-                        break 'render;
-                    }
-                    _ => (),
+            match event {
+                Event::Quit { .. } => {
+                    break 'render;
                 }
+                _ => (),
             }
         }
     }
 }
 
-unsafe fn create_sdl2_context() -> (
+fn create_sdl2_context() -> (
     sdl2::video::Window,
     sdl2::EventPump,
     sdl2::EventSubsystem,
