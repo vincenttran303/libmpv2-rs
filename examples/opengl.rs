@@ -48,7 +48,6 @@ fn main() {
 
     let event_sender = event_subsystem.event_sender();
     render_context.set_update_callback(move || {
-        println!("update callback");
         event_sender
             .push_custom_event(UserEvent::RedrawRequested)
             .unwrap();
@@ -60,7 +59,7 @@ fn main() {
             .push_custom_event(UserEvent::MpvEventAvailable)
             .unwrap();
     });
-    mpv.loadfile_replace(&path, None).unwrap();
+    mpv.command("loadfile", &[&path, "replace"]).unwrap();
 
     'render: loop {
         for event in events_loop.poll_iter() {

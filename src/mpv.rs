@@ -159,7 +159,7 @@ pub struct MpvNodeArrayIter {
     //
     // MPV has one big cleanup function that takes a node so store the parent node
     // and force it to stay alive until the reference count hits 0.
-    node: Rc<DropWrapper>,
+    node: Option<Rc<DropWrapper>>,
     start: *const libmpv2_sys::mpv_node,
     end: *const libmpv2_sys::mpv_node,
 }
@@ -174,7 +174,7 @@ impl Iterator for MpvNodeArrayIter {
             unsafe {
                 let result = ptr::read(self.start);
                 let node = SysMpvNode {
-                    parent: Rc::clone(&self.node),
+                    parent: self.node.clone(),
                     node: result,
                 };
                 self.start = self.start.offset(1);
@@ -190,7 +190,7 @@ pub struct MpvNodeMapIter {
     //
     // MPV has one big cleanup function that takes a node so store the parent node
     // and force it to stay alive until the reference count hits 0.
-    node: Rc<DropWrapper>,
+    node: Option<Rc<DropWrapper>>,
     list: libmpv2_sys::mpv_node_list,
     curr: usize,
 }
@@ -211,7 +211,7 @@ impl Iterator for MpvNodeMapIter {
             };
             self.curr += 1;
             let node = SysMpvNode {
-                parent: Rc::clone(&self.node),
+                parent: self.node.clone(),
                 node: value,
             };
             Some((key.unwrap().to_string(), node.value().unwrap()))
@@ -219,7 +219,6 @@ impl Iterator for MpvNodeMapIter {
     }
 }
 
-// Rust doesn't allow implementing external traits directly on external structs so wrapper is required
 #[derive(Debug)]
 struct DropWrapper(libmpv2_sys::mpv_node);
 
@@ -235,7 +234,9 @@ struct SysMpvNode {
     //
     // MPV has one big cleanup function that takes a node so store the parent node
     // and force it to stay alive until the reference count hits 0.
-    parent: Rc<DropWrapper>,
+    //
+    // Set <parent> field to None if mpv handles the memory automagically
+    parent: Option<Rc<DropWrapper>>,
     node: libmpv2_sys::mpv_node,
 }
 
@@ -253,7 +254,7 @@ impl SysMpvNode {
             mpv_format::Array => {
                 let list = unsafe { *node.u.list };
                 let iter = MpvNodeArrayIter {
-                    node: Rc::clone(&self.parent),
+                    node: self.parent.clone(),
                     start: unsafe { *node.u.list }.values,
                     end: unsafe { list.values.offset(list.num.try_into().unwrap()) },
                 };
@@ -263,7 +264,7 @@ impl SysMpvNode {
             mpv_format::Map => MpvNode::MapIter(MpvNodeMapIter {
                 list: unsafe { *node.u.list },
                 curr: 0,
-                node: Rc::clone(&self.parent),
+                node: self.parent.clone(),
             }),
             mpv_format::None => MpvNode::None,
             _ => return Err(Error::Raw(mpv_error::PropertyError)),
@@ -300,7 +301,7 @@ unsafe impl GetData for MpvNode {
         fun(val.as_mut_ptr() as *mut _)?;
         let sys_node = unsafe { val.assume_init() };
         let node = SysMpvNode {
-            parent: Rc::new(DropWrapper(sys_node)),
+            parent: Some(Rc::new(DropWrapper(sys_node))),
             node: sys_node,
         };
         node.value()
@@ -397,34 +398,6 @@ impl Format {
             Format::Int64 => mpv_format::Int64,
             Format::Double => mpv_format::Double,
             Format::Node => mpv_format::Node,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-/// How a `File` is inserted into the playlist.
-/// See [flags](https://mpv.io/manual/stable/#command-interface-[%3Coptions%3E]]])
-pub enum FileState {
-    #[default]
-    Replace,
-    Append,
-    AppendPlay,
-    InsertNext,
-    InsertNextPlay,
-    InsertAt,
-    InsertAtPlay,
-}
-
-impl FileState {
-    fn val(&self) -> &str {
-        match *self {
-            FileState::Replace => "replace",
-            FileState::Append => "append",
-            FileState::AppendPlay => "append-play",
-            FileState::InsertNext => "insert-next",
-            FileState::InsertNextPlay => "insert-next-play",
-            FileState::InsertAt => "insert-at",
-            FileState::InsertAtPlay => "insert-at-play",
         }
     }
 }
@@ -585,509 +558,5 @@ impl Mpv {
     /// This can be called at any time, even if it was stated that no API function should be called.
     pub fn get_internal_time(&self) -> i64 {
         unsafe { libmpv2_sys::mpv_get_time_us(self.ctx.as_ptr()) }
-    }
-
-    // --- Convenience property functions ---
-    //
-
-    /// Add -or subtract- any value from a property. Over/underflow clamps to max/min.
-    pub fn add_property(&self, property: &str, value: isize) -> Result<()> {
-        self.command("add", &[property, &format!("{}", value)])
-    }
-
-    /// Cycle through a given property. `up` specifies direction. On
-    /// overflow, set the property back to the minimum, on underflow set it to the maximum.
-    pub fn cycle_property(&self, property: &str, up: bool) -> Result<()> {
-        self.command("cycle", &[property, if up { "up" } else { "down" }])
-    }
-
-    /// Multiply any property with any positive factor.
-    pub fn multiply_property(&self, property: &str, factor: usize) -> Result<()> {
-        self.command("multiply", &[property, &format!("{}", factor)])
-    }
-
-    /// Pause playback at runtime.
-    pub fn pause(&self) -> Result<()> {
-        self.set_property("pause", true)
-    }
-
-    /// Unpause playback at runtime.
-    pub fn unpause(&self) -> Result<()> {
-        self.set_property("pause", false)
-    }
-
-    // --- Seek functions ---
-    //
-
-    /// Seek forward relatively from current position in seconds.
-    /// This is less exact than `seek_absolute`, see [mpv manual](https://mpv.io/manual/master/#command-interface-[relative|absolute|absolute-percent|relative-percent|exact|keyframes]).
-    pub fn seek_forward(&self, secs: ctype::c_double) -> Result<()> {
-        self.command("seek", &[&format!("{}", secs), "relative"])
-    }
-
-    /// See `seek_forward`.
-    pub fn seek_backward(&self, secs: ctype::c_double) -> Result<()> {
-        self.command("seek", &[&format!("-{}", secs), "relative"])
-    }
-
-    /// Seek to a given absolute secs.
-    pub fn seek_absolute(&self, secs: ctype::c_double) -> Result<()> {
-        self.command("seek", &[&format!("{}", secs), "absolute"])
-    }
-
-    /// Seek to a given relative percent position (may be negative).
-    /// If `percent` of the playtime is bigger than the remaining playtime, the next file is played.
-    /// out of bounds values are clamped to either 0 or 100.
-    pub fn seek_percent(&self, percent: isize) -> Result<()> {
-        self.command("seek", &[&format!("{}", percent), "relative-percent"])
-    }
-
-    /// Seek to the given percentage of the playtime.
-    pub fn seek_percent_absolute(&self, percent: usize) -> Result<()> {
-        self.command("seek", &[&format!("{}", percent), "relative-percent"])
-    }
-
-    /// Revert the previous `seek_` call, can also revert itself.
-    pub fn seek_revert(&self) -> Result<()> {
-        self.command("revert-seek", &[])
-    }
-
-    /// Mark the current position as the position that will be seeked to by `seek_revert`.
-    pub fn seek_revert_mark(&self) -> Result<()> {
-        self.command("revert-seek", &["mark"])
-    }
-
-    /// Seek exactly one frame, and pause.
-    /// Noop on audio only streams.
-    pub fn seek_frame(&self) -> Result<()> {
-        self.command("frame-step", &[])
-    }
-
-    /// See `seek_frame`.
-    /// [Note performance considerations.](https://mpv.io/manual/master/#command-interface-frame-back-step)
-    pub fn seek_frame_backward(&self) -> Result<()> {
-        self.command("frame-back-step", &[])
-    }
-
-    // --- Screenshot functions ---
-    //
-
-    /// "Save the video image, in its original resolution, and with subtitles.
-    /// Some video outputs may still include the OSD in the output under certain circumstances.".
-    ///
-    /// "\[O\]ptionally save it to a given file. The format of the file will be
-    /// guessed by the extension (and --screenshot-format is ignored - the behaviour when the
-    /// extension is missing or unknown is arbitrary). If the file already exists, it's overwritten.
-    /// Like all input command parameters, the filename is subject to property expansion as
-    /// described in [Property Expansion](https://mpv.io/manual/master/#property-expansion)."
-    pub fn screenshot_subtitles(&self, path: Option<&str>) -> Result<()> {
-        if let Some(path) = path {
-            self.command("screenshot", &[&format!("\"{}\"", path), "subtitles"])
-        } else {
-            self.command("screenshot", &["subtitles"])
-        }
-    }
-
-    /// "Like subtitles, but typically without OSD or subtitles. The exact behavior
-    /// depends on the selected video output."
-    pub fn screenshot_video(&self, path: Option<&str>) -> Result<()> {
-        if let Some(path) = path {
-            self.command("screenshot", &[&format!("\"{}\"", path), "video"])
-        } else {
-            self.command("screenshot", &["video"])
-        }
-    }
-
-    /// "Save the contents of the mpv window. Typically scaled, with OSD and subtitles. The exact
-    /// behaviour depends on the selected video output, and if no support is available,
-    /// this will act like video.".
-    pub fn screenshot_window(&self, path: Option<&str>) -> Result<()> {
-        if let Some(path) = path {
-            self.command("screenshot", &[&format!("\"{}\"", path), "window"])
-        } else {
-            self.command("screenshot", &["window"])
-        }
-    }
-
-    // --- Playlist functions ---
-    //
-
-    /// Play the next item of the current playlist.
-    /// Does nothing if the current item is the last item.
-    pub fn playlist_next_weak(&self) -> Result<()> {
-        self.command("playlist-next", &["weak"])
-    }
-
-    /// Play the next item of the current playlist.
-    /// Terminates playback if the current item is the last item.
-    pub fn playlist_next_force(&self) -> Result<()> {
-        self.command("playlist-next", &["force"])
-    }
-
-    /// See `playlist_next_weak`.
-    pub fn playlist_previous_weak(&self) -> Result<()> {
-        self.command("playlist-prev", &["weak"])
-    }
-
-    /// See `playlist_next_force`.
-    pub fn playlist_previous_force(&self) -> Result<()> {
-        self.command("playlist-prev", &["force"])
-    }
-
-    /// Stop playback of the current file, and play the new file immediately.
-    /// [More information.](https://mpv.io/manual/stable/#command-interface-[%3Coptions%3E]]])
-    ///
-    /// # Peculiarities
-    /// `loadfile` is kind of asynchronous, any additional option is set during loading,
-    /// [specifics](https://github.com/mpv-player/mpv/issues/4089).
-    pub fn loadfile_replace(&self, url: &str, options: Option<&str>) -> Result<()> {
-        let args = options.unwrap_or_default();
-
-        let ret = self.command(
-            "loadfile",
-            &[&format!("\"{}\"", url), FileState::Replace.val(), "0", args],
-        );
-
-        if let Err(err) = ret {
-            return Err(Error::Loadfile {
-                error: ::std::rc::Rc::new(err),
-            });
-        }
-        Ok(())
-    }
-
-    /// Append the file to the playlist. Optionally play the file immediately if nothing else is playing.
-    /// [More information.](https://mpv.io/manual/stable/#command-interface-[%3Coptions%3E]]])
-    ///
-    /// # Peculiarities
-    /// `loadfile` is kind of asynchronous, any additional option is set during loading,
-    /// [specifics](https://github.com/mpv-player/mpv/issues/4089).
-    pub fn loadfile_append(&self, url: &str, play: bool, options: Option<&str>) -> Result<()> {
-        let args = options.unwrap_or_default();
-
-        let ret = self.command(
-            "loadfile",
-            &[
-                &format!("\"{}\"", url),
-                if play {
-                    FileState::AppendPlay.val()
-                } else {
-                    FileState::Append.val()
-                },
-                "0",
-                args,
-            ],
-        );
-
-        if let Err(err) = ret {
-            return Err(Error::Loadfile {
-                error: ::std::rc::Rc::new(err),
-            });
-        }
-        Ok(())
-    }
-
-    /// Insert the file into the playlist, directly after the current entry. Optionally play the file immediately if nothing else is playing.
-    /// [More information.](https://mpv.io/manual/stable/#command-interface-[%3Coptions%3E]]])
-    ///
-    /// # Peculiarities
-    /// `loadfile` is kind of asynchronous, any additional option is set during loading,
-    /// [specifics](https://github.com/mpv-player/mpv/issues/4089).
-    pub fn loadfile_insert_next(&self, url: &str, play: bool, options: Option<&str>) -> Result<()> {
-        let args = options.unwrap_or_default();
-
-        let ret = self.command(
-            "loadfile",
-            &[
-                &format!("\"{}\"", url),
-                if play {
-                    FileState::InsertNextPlay.val()
-                } else {
-                    FileState::InsertNext.val()
-                },
-                "0",
-                args,
-            ],
-        );
-
-        if let Err(err) = ret {
-            return Err(Error::Loadfile {
-                error: ::std::rc::Rc::new(err),
-            });
-        }
-        Ok(())
-    }
-
-    /// Insert the file into the playlist, at the index given. Optionally play the file immediately if nothing else is playing.
-    /// [More information.](https://mpv.io/manual/stable/#command-interface-[%3Coptions%3E]]])
-    ///
-    /// # Peculiarities
-    /// `loadfile` is kind of asynchronous, any additional option is set during loading,
-    /// [specifics](https://github.com/mpv-player/mpv/issues/4089).    
-    pub fn loadfile_insert_at(
-        &self,
-        url: &str,
-        play: bool,
-        index: i32,
-        options: Option<&str>,
-    ) -> Result<()> {
-        let args = options.unwrap_or_default();
-
-        let ret = self.command(
-            "loadfile",
-            &[
-                &format!("\"{}\"", url),
-                if play {
-                    FileState::InsertAtPlay.val()
-                } else {
-                    FileState::InsertAt.val()
-                },
-                &index.to_string(),
-                args,
-            ],
-        );
-
-        if let Err(err) = ret {
-            return Err(Error::Loadfile {
-                error: ::std::rc::Rc::new(err),
-            });
-        }
-        Ok(())
-    }
-
-    /// Load the given playlist file, that either replaces the current playlist, or appends to it.
-    pub fn playlist_load_list(&self, path: &str, replace: bool) -> Result<()> {
-        if replace {
-            self.command("loadlist", &[&format!("\"{}\"", path), "replace"])
-        } else {
-            self.command("loadlist", &[&format!("\"{}\"", path), "append"])
-        }
-    }
-
-    /// Remove every, except the current, item from the playlist.
-    pub fn playlist_clear(&self) -> Result<()> {
-        self.command("playlist-clear", &[])
-    }
-
-    /// Remove the currently selected item from the playlist.
-    pub fn playlist_remove_current(&self) -> Result<()> {
-        self.command("playlist-remove", &["current"])
-    }
-
-    /// Remove item at `position` from the playlist.
-    pub fn playlist_remove_index(&self, position: usize) -> Result<()> {
-        self.command("playlist-remove", &[&format!("{}", position)])
-    }
-
-    /// Move item `old` to the position of item `new`.
-    pub fn playlist_move(&self, old: usize, new: usize) -> Result<()> {
-        self.command("playlist-move", &[&format!("{}", new), &format!("{}", old)])
-    }
-
-    /// Shuffle the playlist.
-    pub fn playlist_shuffle(&self) -> Result<()> {
-        self.command("playlist-shuffle", &[])
-    }
-
-    // --- Subtitle functions ---
-    //
-
-    /// Add and select the subtitle immediately.
-    /// Specifying a language requires specifying a title.
-    ///
-    /// # Panics
-    /// If a language but not title was specified.
-    pub fn subtitle_add_select(
-        &self,
-        path: &str,
-        title: Option<&str>,
-        lang: Option<&str>,
-    ) -> Result<()> {
-        match (title, lang) {
-            (None, None) => self.command("sub-add", &[&format!("\"{}\"", path), "select"]),
-            (Some(t), None) => self.command("sub-add", &[&format!("\"{}\"", path), "select", t]),
-            (None, Some(_)) => panic!("Given subtitle language, but missing title"),
-            (Some(t), Some(l)) => {
-                self.command("sub-add", &[&format!("\"{}\"", path), "select", t, l])
-            }
-        }
-    }
-
-    /// See `AddSelect`. "Don't select the subtitle.
-    /// (Or in some special situations, let the default stream selection mechanism decide.)".
-    ///
-    /// Returns an `Error::InvalidArgument` if a language, but not a title, was provided.
-    ///
-    /// # Panics
-    /// If a language but not title was specified.
-    pub fn subtitle_add_auto(
-        &self,
-        path: &str,
-        title: Option<&str>,
-        lang: Option<&str>,
-    ) -> Result<()> {
-        match (title, lang) {
-            (None, None) => self.command("sub-add", &[&format!("\"{}\"", path), "auto"]),
-            (Some(t), None) => self.command("sub-add", &[&format!("\"{}\"", path), "auto", t]),
-            (Some(t), Some(l)) => {
-                self.command("sub-add", &[&format!("\"{}\"", path), "auto", t, l])
-            }
-            (None, Some(_)) => panic!("Given subtitle language, but missing title"),
-        }
-    }
-
-    /// See `AddSelect`. "Select the subtitle. If a subtitle with the same file name was
-    /// already added, that one is selected, instead of loading a duplicate entry.
-    /// (In this case, title/language are ignored, and if the \[sub\] was changed since it was loaded,
-    /// these changes won't be reflected.)".
-    pub fn subtitle_add_cached(&self, path: &str) -> Result<()> {
-        self.command("sub-add", &[&format!("\"{}\"", path), "cached"])
-    }
-
-    /// "Remove the given subtitle track. If the id argument is missing, remove the current
-    /// track. (Works on external subtitle files only.)"
-    pub fn subtitle_remove(&self, index: Option<usize>) -> Result<()> {
-        if let Some(idx) = index {
-            self.command("sub-remove", &[&format!("{}", idx)])
-        } else {
-            self.command("sub-remove", &[])
-        }
-    }
-
-    /// "Reload the given subtitle track. If the id argument is missing, reload the current
-    /// track. (Works on external subtitle files only.)"
-    pub fn subtitle_reload(&self, index: Option<usize>) -> Result<()> {
-        if let Some(idx) = index {
-            self.command("sub-reload", &[&format!("{}", idx)])
-        } else {
-            self.command("sub-reload", &[])
-        }
-    }
-
-    /// "Change subtitle timing such, that the subtitle event after the next `isize` subtitle
-    /// events is displayed. `isize` can be negative to step backwards."
-    pub fn subtitle_step(&self, skip: isize) -> Result<()> {
-        self.command("sub-step", &[&format!("{}", skip)])
-    }
-
-    /// "Seek to the next subtitle. This is similar to sub-step, except that it seeks video and
-    /// audio instead of adjusting the subtitle delay.
-    /// For embedded subtitles (like with matroska), this works only with subtitle events that
-    /// have already been displayed, or are within a short prefetch range."
-    pub fn subtitle_seek_forward(&self) -> Result<()> {
-        self.command("sub-seek", &["1"])
-    }
-
-    /// See `SeekForward`.
-    pub fn subtitle_seek_backward(&self) -> Result<()> {
-        self.command("sub-seek", &["-1"])
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use super::*;
-
-    #[test]
-    fn playlist_one() -> Result<()> {
-        let mpv = Mpv::new().unwrap();
-        mpv.set_property("vo", "null").unwrap();
-        mpv.set_property("ao", "null").unwrap();
-
-        mpv.loadfile_replace("test-data/jellyfish.mp4", None)
-            .unwrap();
-
-        let expected_file = HashMap::from([
-            (String::from("id"), MpvNode::Int64(1)),
-            (
-                String::from("filename"),
-                MpvNode::String(String::from("test-data/jellyfish.mp4")),
-            ),
-            (String::from("current"), MpvNode::Flag(true)),
-        ]);
-
-        let mut playlist = mpv
-            .get_property::<MpvNode>("playlist")
-            .unwrap()
-            .array()
-            .unwrap()
-            .collect::<Vec<_>>();
-
-        let file = playlist
-            .pop()
-            .unwrap()
-            .map()
-            .unwrap()
-            .collect::<HashMap<_, _>>();
-        assert_eq!(file, expected_file);
-
-        Ok(())
-    }
-
-    #[test]
-    fn playlist_multi() -> Result<()> {
-        let mpv = Mpv::new().unwrap();
-        mpv.set_property("vo", "null").unwrap();
-        mpv.set_property("ao", "null").unwrap();
-
-        mpv.loadfile_replace("test-data/jellyfish.mp4", None)?;
-        mpv.loadfile_append("test-data/speech_12kbps_mb.wav", false, None)?;
-        mpv.loadfile_insert_at("test-data/jellyfish.mp4", false, 1, None)?;
-
-        let expected_0 = HashMap::from([
-            (String::from("id"), MpvNode::Int64(1)),
-            (
-                String::from("filename"),
-                MpvNode::String(String::from("test-data/jellyfish.mp4")),
-            ),
-            (String::from("current"), MpvNode::Flag(true)),
-        ]);
-
-        let expected_1 = HashMap::from([
-            (String::from("id"), MpvNode::Int64(3)),
-            (
-                String::from("filename"),
-                MpvNode::String(String::from("test-data/jellyfish.mp4")),
-            ),
-        ]);
-
-        let expected_2 = HashMap::from([
-            (String::from("id"), MpvNode::Int64(2)),
-            (
-                String::from("filename"),
-                MpvNode::String(String::from("test-data/speech_12kbps_mb.wav")),
-            ),
-        ]);
-
-        let playlist = mpv
-            .get_property::<MpvNode>("playlist")
-            .unwrap()
-            .array()
-            .unwrap()
-            .collect::<Vec<_>>();
-
-        let file_1 = playlist[0]
-            .clone()
-            .map()
-            .unwrap()
-            .collect::<HashMap<_, _>>();
-        assert_eq!(file_1, expected_0);
-
-        let file_2 = playlist[1]
-            .clone()
-            .map()
-            .unwrap()
-            .collect::<HashMap<_, _>>();
-        assert_eq!(file_2, expected_1);
-
-        let file_3 = playlist[2]
-            .clone()
-            .map()
-            .unwrap()
-            .collect::<HashMap<_, _>>();
-        assert_eq!(file_3, expected_2);
-        Ok(())
     }
 }

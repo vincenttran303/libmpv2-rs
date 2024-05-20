@@ -58,8 +58,12 @@ impl<'a> PropertyData<'a> {
             mpv_format::Double => Ok(PropertyData::Double(*(ptr as *mut f64))),
             mpv_format::Int64 => Ok(PropertyData::Int64(*(ptr as *mut i64))),
             mpv_format::Node => {
-                let sys_node = &*(ptr as *mut SysMpvNode);
-                return Ok(PropertyData::Node(sys_node.value().unwrap()));
+                let sys_node = *(ptr as *mut libmpv2_sys::mpv_node);
+                let node = SysMpvNode {
+                    parent: None,
+                    node: sys_node,
+                };
+                return Ok(PropertyData::Node(node.value().unwrap()));
             }
             mpv_format::None => unreachable!(),
             _ => unimplemented!(),

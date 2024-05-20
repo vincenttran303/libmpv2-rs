@@ -38,8 +38,11 @@ fn properties() {
         0.6,
         f64::round(subg * f64::powi(10.0, 4)) / f64::powi(10.0, 4)
     );
-    mpv.loadfile_append("test-data/speech_12kbps_mb.wav", true, None)
-        .unwrap();
+    mpv.command(
+        "loadfile",
+        &["test-data/speech_12kbps_mb.wav", "append-play"],
+    )
+    .unwrap();
     thread::sleep(Duration::from_millis(250));
 
     let title: MpvStr = mpv.get_property("media-title").unwrap();
@@ -99,7 +102,7 @@ fn events() {
         })
     );
     assert!(ev_ctx.wait_event(3.).is_none());
-    mpv.loadfile_append("test-data/jellyfish.mp4", true, None)
+    mpv.command("loadfile", &["test-data/jellyfish.mp4", "append-play"])
         .unwrap();
     assert_event_occurs!(ev_ctx, 10., Ok(Event::StartFile));
     assert_event_occurs!(
@@ -117,7 +120,7 @@ fn events() {
     assert_event_occurs!(ev_ctx, 3., Ok(Event::AudioReconfig));
     assert_event_occurs!(ev_ctx, 3., Ok(Event::VideoReconfig));
 
-    mpv.loadfile_replace("test-data/speech_12kbps_mb.wav", None)
+    mpv.command("loadfile", &["test-data/speech_12kbps_mb.wav", "replace"])
         .unwrap();
     assert_event_occurs!(ev_ctx, 3., Ok(Event::VideoReconfig));
     assert_event_occurs!(ev_ctx, 3., Ok(Event::AudioReconfig));
@@ -150,8 +153,11 @@ fn events() {
 fn node_map() -> Result<()> {
     let mpv = Mpv::new()?;
 
-    mpv.loadfile_append("test-data/speech_12kbps_mb.wav", true, None)
-        .unwrap();
+    mpv.command(
+        "loadfile",
+        &["test-data/speech_12kbps_mb.wav", "append-play"],
+    )
+    .unwrap();
 
     thread::sleep(Duration::from_millis(250));
     let audio_params = mpv.get_property::<MpvNode>("audio-params")?;
@@ -181,8 +187,11 @@ fn node_map() -> Result<()> {
 fn node_array() -> Result<()> {
     let mpv = Mpv::new()?;
 
-    mpv.loadfile_append("test-data/speech_12kbps_mb.wav", true, None)
-        .unwrap();
+    mpv.command(
+        "loadfile",
+        &["test-data/speech_12kbps_mb.wav", "append-play"],
+    )
+    .unwrap();
 
     thread::sleep(Duration::from_millis(250));
     let playlist = mpv.get_property::<MpvNode>("playlist")?;

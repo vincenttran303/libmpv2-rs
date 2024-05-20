@@ -38,11 +38,11 @@ fn main() {
     let proto_ctx = mpv.create_protocol_context();
     proto_ctx.register(protocol).unwrap();
 
-    mpv.loadfile_append(&path, true, None).unwrap();
+    mpv.command("loadfile", &[&path, "append-play"]).unwrap();
 
     thread::sleep(Duration::from_secs(10));
 
-    mpv.seek_forward(15.).unwrap();
+    mpv.command("seek", &["15"]).unwrap();
 
     thread::sleep(Duration::from_secs(5));
 }

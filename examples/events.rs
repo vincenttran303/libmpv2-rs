@@ -2,7 +2,7 @@ use libmpv2::{events::*, *};
 
 use std::{collections::HashMap, env, thread, time::Duration};
 
-const VIDEO_URL: &str = "test-data/jellyfish.mp4";
+const VIDEO_URL: &str = "https://www.youtube.com/watch?v=VLnWf1sQkjY";
 
 fn main() -> Result<()> {
     let path = env::args()
@@ -10,9 +10,12 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| String::from(VIDEO_URL));
 
     // Create an `Mpv` and set some properties.
-    let mpv = Mpv::new()?;
+    let mpv = Mpv::with_initializer(|init| {
+        init.set_property("vo", "null")?;
+        Ok(())
+    })
+    .unwrap();
     mpv.set_property("volume", 15)?;
-    mpv.set_property("vo", "null")?;
 
     let mut ev_ctx = EventContext::new(mpv.ctx);
     ev_ctx.disable_deprecated_events()?;
@@ -21,7 +24,7 @@ fn main() -> Result<()> {
 
     crossbeam::scope(|scope| {
         scope.spawn(|_| {
-            mpv.loadfile_append(&path, true, None).unwrap();
+            mpv.command("loadfile", &[&path, "append-play"]).unwrap();
 
             thread::sleep(Duration::from_secs(3));
 
@@ -30,7 +33,7 @@ fn main() -> Result<()> {
             thread::sleep(Duration::from_secs(5));
 
             // Trigger `Event::EndFile`.
-            mpv.playlist_next_force().unwrap();
+            mpv.command("playlist-next", &["force"]).unwrap();
         });
         scope.spawn(move |_| loop {
             let ev = ev_ctx.wait_event(600.).unwrap_or(Err(Error::Null));
@@ -46,7 +49,7 @@ fn main() -> Result<()> {
                     change: PropertyData::Node(mpv_node),
                     ..
                 }) => {
-                    let ranges = seekable_ranges(mpv_node).unwrap();
+                    let ranges = seekable_ranges(mpv_node);
                     println!("Seekable ranges updated: {:?}", ranges);
                 }
                 Ok(e) => println!("Event triggered: {:?}", e),
@@ -58,15 +61,23 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn seekable_ranges(demuxer_cache_state: MpvNode) -> Option<Vec<(f64, f64)>> {
+fn seekable_ranges(demuxer_cache_state: MpvNode) -> Vec<(f64, f64)> {
     let mut res = Vec::new();
-    let props = demuxer_cache_state.map()?.collect::<HashMap<_, _>>();
-    let ranges = props.get("seekable-ranges")?.clone().array().unwrap();
+    let props = demuxer_cache_state
+        .map()
+        .unwrap()
+        .collect::<HashMap<_, _>>();
+    let ranges = props
+        .get("seekable-ranges")
+        .unwrap()
+        .clone()
+        .array()
+        .unwrap();
     for node in ranges {
         let range = node.map().unwrap().collect::<HashMap<_, _>>();
-        let start = range.get("start")?.f64().unwrap();
-        let end = range.get("end")?.f64().unwrap();
+        let start = range.get("start").unwrap().f64().unwrap();
+        let end = range.get("end").unwrap().f64().unwrap();
         res.push((start, end));
     }
-    Some(res)
+    res
 }
