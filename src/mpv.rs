@@ -535,6 +535,19 @@ impl Mpv {
     /// so that the syntax is the same as described in the [manual for the input.conf](https://mpv.io/manual/master/#list-of-input-commands).
     ///
     /// Note that you may have to escape strings with `""` when they contain spaces.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use libmpv2::{Mpv};
+    /// # use libmpv2::mpv_node::MpvNode;
+    /// # use std::collections::HashMap;
+    /// mpv.command("loadfile", &["test-data/jellyfish.mp4", "append-play"]).unwrap();
+    /// # let node = mpv.get_property::<MpvNode>("playlist").unwrap();
+    /// # let mut list = node.array().unwrap().collect::<Vec<_>>();
+    /// # let map = list.pop().unwrap().map().unwrap().collect::<HashMap<_, _>>();
+    /// # assert_eq!(map, HashMap::from([(String::from("id"), MpvNode::Int64(1)), (String::from("current"), MpvNode::Flag(true)), (String::from("filename"), MpvNode::String(String::from("test-data/jellyfish.mp4")))]));
+    /// ```
     pub fn command(&self, name: &str, args: &[&str]) -> Result<()> {
         let mut cmd = name.to_owned();
 
