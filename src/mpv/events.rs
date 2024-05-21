@@ -1,4 +1,4 @@
-use crate::mpv::SysMpvNode;
+use crate::mpv_node::sys_node::SysMpvNode;
 use crate::{mpv::mpv_err, *};
 
 use std::ffi::{c_void, CString};
@@ -8,6 +8,8 @@ use std::slice;
 
 /// An `Event`'s ID.
 pub use libmpv2_sys::mpv_event_id as EventId;
+
+use self::mpv_node::MpvNode;
 pub mod mpv_event_id {
     pub use libmpv2_sys::mpv_event_id_MPV_EVENT_AUDIO_RECONFIG as AudioReconfig;
     pub use libmpv2_sys::mpv_event_id_MPV_EVENT_CLIENT_MESSAGE as ClientMessage;
@@ -59,10 +61,7 @@ impl<'a> PropertyData<'a> {
             mpv_format::Int64 => Ok(PropertyData::Int64(*(ptr as *mut i64))),
             mpv_format::Node => {
                 let sys_node = *(ptr as *mut libmpv2_sys::mpv_node);
-                let node = SysMpvNode {
-                    parent: None,
-                    node: sys_node,
-                };
+                let node = SysMpvNode::new(sys_node, false);
                 return Ok(PropertyData::Node(node.value().unwrap()));
             }
             mpv_format::None => unreachable!(),

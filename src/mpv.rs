@@ -25,9 +25,7 @@ use std::{
     ffi::CString,
     mem::MaybeUninit,
     ops::Deref,
-    os::raw as ctype,
     ptr::{self, NonNull},
-    rc::Rc,
     sync::atomic::AtomicBool,
 };
 
@@ -80,195 +78,233 @@ unsafe impl GetData for i64 {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum MpvNode {
-    String(String),
-    Flag(bool),
-    Int64(i64),
-    Double(f64),
-    ArrayIter(MpvNodeArrayIter),
-    MapIter(MpvNodeMapIter),
-    None,
-}
+pub mod mpv_node {
+    use self::sys_node::SysMpvNode;
+    use crate::{Error, Format, GetData, Result};
+    use std::{mem::MaybeUninit, os::raw::c_void, ptr};
 
-impl MpvNode {
-    pub fn bool(&self) -> Option<bool> {
-        if let MpvNode::Flag(value) = *self {
-            Some(value)
-        } else {
-            None
-        }
-    }
-    pub fn i64(&self) -> Option<i64> {
-        if let MpvNode::Int64(value) = *self {
-            Some(value)
-        } else {
-            None
-        }
-    }
-    pub fn f64(&self) -> Option<f64> {
-        if let MpvNode::Double(value) = *self {
-            Some(value)
-        } else {
-            None
-        }
+    #[derive(Debug, Clone)]
+    pub enum MpvNode {
+        String(String),
+        Flag(bool),
+        Int64(i64),
+        Double(f64),
+        ArrayIter(MpvNodeArrayIter),
+        MapIter(MpvNodeMapIter),
+        None,
     }
 
-    pub fn str(&self) -> Option<&str> {
-        if let MpvNode::String(value) = self {
-            Some(value)
-        } else {
-            None
+    impl MpvNode {
+        pub fn bool(&self) -> Option<bool> {
+            if let MpvNode::Flag(value) = *self {
+                Some(value)
+            } else {
+                None
+            }
+        }
+        pub fn i64(&self) -> Option<i64> {
+            if let MpvNode::Int64(value) = *self {
+                Some(value)
+            } else {
+                None
+            }
+        }
+        pub fn f64(&self) -> Option<f64> {
+            if let MpvNode::Double(value) = *self {
+                Some(value)
+            } else {
+                None
+            }
+        }
+
+        pub fn str(&self) -> Option<&str> {
+            if let MpvNode::String(value) = self {
+                Some(value)
+            } else {
+                None
+            }
+        }
+
+        pub fn array(self) -> Option<MpvNodeArrayIter> {
+            if let MpvNode::ArrayIter(value) = self {
+                Some(value)
+            } else {
+                None
+            }
+        }
+
+        pub fn map(self) -> Option<MpvNodeMapIter> {
+            if let MpvNode::MapIter(value) = self {
+                Some(value)
+            } else {
+                None
+            }
         }
     }
 
-    pub fn array(self) -> Option<MpvNodeArrayIter> {
-        if let MpvNode::ArrayIter(value) = self {
-            Some(value)
-        } else {
-            None
+    impl PartialEq for MpvNode {
+        fn eq(&self, other: &Self) -> bool {
+            match (self, other) {
+                (Self::String(l0), Self::String(r0)) => l0 == r0,
+                (Self::Flag(l0), Self::Flag(r0)) => l0 == r0,
+                (Self::Int64(l0), Self::Int64(r0)) => l0 == r0,
+                (Self::Double(l0), Self::Double(r0)) => l0 == r0,
+                (Self::ArrayIter(l0), Self::ArrayIter(r0)) => l0.clone().eq(r0.clone()),
+                (Self::MapIter(l0), Self::MapIter(r0)) => l0.clone().eq(r0.clone()),
+                _ => core::mem::discriminant(self) == core::mem::discriminant(other),
+            }
         }
     }
 
-    pub fn map(self) -> Option<MpvNodeMapIter> {
-        if let MpvNode::MapIter(value) = self {
-            Some(value)
-        } else {
-            None
-        }
-    }
-}
+    #[derive(Debug)]
+    struct DropWrapper(libmpv2_sys::mpv_node);
 
-impl PartialEq for MpvNode {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::String(l0), Self::String(r0)) => l0 == r0,
-            (Self::Flag(l0), Self::Flag(r0)) => l0 == r0,
-            (Self::Int64(l0), Self::Int64(r0)) => l0 == r0,
-            (Self::Double(l0), Self::Double(r0)) => l0 == r0,
-            (Self::ArrayIter(l0), Self::ArrayIter(r0)) => l0.clone().eq(r0.clone()),
-            (Self::MapIter(l0), Self::MapIter(r0)) => l0.clone().eq(r0.clone()),
-            _ => core::mem::discriminant(self) == core::mem::discriminant(other),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MpvNodeArrayIter {
-    // Reference counted pointer to a parent node so it stays alive long enough.
-    //
-    // MPV has one big cleanup function that takes a node so store the parent node
-    // and force it to stay alive until the reference count hits 0.
-    node: Option<Rc<DropWrapper>>,
-    start: *const libmpv2_sys::mpv_node,
-    end: *const libmpv2_sys::mpv_node,
-}
-
-impl Iterator for MpvNodeArrayIter {
-    type Item = MpvNode;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.start == self.end {
-            None
-        } else {
+    impl Drop for DropWrapper {
+        fn drop(&mut self) {
             unsafe {
-                let result = ptr::read(self.start);
-                let node = SysMpvNode {
-                    parent: self.node.clone(),
-                    node: result,
-                };
-                self.start = self.start.offset(1);
-                node.value().ok()
+                libmpv2_sys::mpv_free_node_contents(&mut self.0 as *mut libmpv2_sys::mpv_node)
+            };
+        }
+    }
+
+    pub mod sys_node {
+        use super::{DropWrapper, MpvNode, MpvNodeArrayIter, MpvNodeMapIter};
+        use crate::{mpv_error, mpv_format, Error, Result};
+        use std::rc::Rc;
+
+        #[derive(Debug, Clone)]
+        pub struct SysMpvNode {
+            // Reference counted pointer to a parent node so it stays alive long enough.
+            //
+            // MPV has one big cleanup function that takes a node so store the parent node
+            // and force it to stay alive until the reference count hits 0.
+            parent: Option<Rc<DropWrapper>>,
+            node: libmpv2_sys::mpv_node,
+        }
+
+        impl SysMpvNode {
+            pub fn new(node: libmpv2_sys::mpv_node, drop: bool) -> Self {
+                Self {
+                    parent: if drop {
+                        Some(Rc::new(DropWrapper(node)))
+                    } else {
+                        None
+                    },
+                    node,
+                }
+            }
+
+            pub fn child(self: Self, node: libmpv2_sys::mpv_node) -> Self {
+                Self {
+                    parent: self.parent,
+                    node,
+                }
+            }
+
+            pub fn value(&self) -> Result<MpvNode> {
+                let node = self.node;
+                Ok(match node.format {
+                    mpv_format::Flag => MpvNode::Flag(unsafe { node.u.flag } == 1),
+                    mpv_format::Int64 => MpvNode::Int64(unsafe { node.u.int64 }),
+                    mpv_format::Double => MpvNode::Double(unsafe { node.u.double_ }),
+                    mpv_format::String => {
+                        let text = unsafe { mpv_cstr_to_str!(node.u.string) }?.to_owned();
+                        MpvNode::String(text)
+                    }
+                    mpv_format::Array => {
+                        let list = unsafe { *node.u.list };
+                        let iter = MpvNodeArrayIter {
+                            node: self.clone(),
+                            start: unsafe { *node.u.list }.values,
+                            end: unsafe { list.values.offset(list.num.try_into().unwrap()) },
+                        };
+                        return Ok(MpvNode::ArrayIter(iter));
+                    }
+
+                    mpv_format::Map => MpvNode::MapIter(MpvNodeMapIter {
+                        list: unsafe { *node.u.list },
+                        curr: 0,
+                        node: self.clone(),
+                    }),
+                    mpv_format::None => MpvNode::None,
+                    _ => return Err(Error::Raw(mpv_error::PropertyError)),
+                })
             }
         }
     }
-}
 
-#[derive(Debug, Clone)]
-pub struct MpvNodeMapIter {
-    // Reference counted pointer to a parent node so it stays alive long enough.
-    //
-    // MPV has one big cleanup function that takes a node so store the parent node
-    // and force it to stay alive until the reference count hits 0.
-    node: Option<Rc<DropWrapper>>,
-    list: libmpv2_sys::mpv_node_list,
-    curr: usize,
-}
+    #[derive(Debug, Clone)]
+    pub struct MpvNodeArrayIter {
+        // Reference counted pointer to a parent node so it stays alive long enough.
+        //
+        // MPV has one big cleanup function that takes a node so store the parent node
+        // and force it to stay alive until the reference count hits 0.
+        node: SysMpvNode,
+        start: *const libmpv2_sys::mpv_node,
+        end: *const libmpv2_sys::mpv_node,
+    }
 
-impl Iterator for MpvNodeMapIter {
-    type Item = (String, MpvNode);
+    impl Iterator for MpvNodeArrayIter {
+        type Item = MpvNode;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.curr >= self.list.num.try_into().unwrap() {
-            None
-        } else {
-            let offset = self.curr.try_into().unwrap();
-            let (key, value) = unsafe {
-                (
-                    mpv_cstr_to_str!(*self.list.keys.offset(offset)),
-                    *self.list.values.offset(offset),
-                )
-            };
-            self.curr += 1;
-            let node = SysMpvNode {
-                parent: self.node.clone(),
-                node: value,
-            };
-            Some((key.unwrap().to_string(), node.value().unwrap()))
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.start == self.end {
+                None
+            } else {
+                unsafe {
+                    let result = ptr::read(self.start);
+                    let node = SysMpvNode::child(self.node.clone(), result);
+                    self.start = self.start.offset(1);
+                    node.value().ok()
+                }
+            }
         }
     }
-}
 
-#[derive(Debug)]
-struct DropWrapper(libmpv2_sys::mpv_node);
-
-impl Drop for DropWrapper {
-    fn drop(&mut self) {
-        unsafe { libmpv2_sys::mpv_free_node_contents(&mut self.0 as *mut libmpv2_sys::mpv_node) };
+    #[derive(Debug, Clone)]
+    pub struct MpvNodeMapIter {
+        // Reference counted pointer to a parent node so it stays alive long enough.
+        //
+        // MPV has one big cleanup function that takes a node so store the parent node
+        // and force it to stay alive until the reference count hits 0.
+        node: SysMpvNode,
+        list: libmpv2_sys::mpv_node_list,
+        curr: usize,
     }
-}
 
-#[derive(Debug)]
-struct SysMpvNode {
-    // Reference counted pointer to a parent node so it stays alive long enough.
-    //
-    // MPV has one big cleanup function that takes a node so store the parent node
-    // and force it to stay alive until the reference count hits 0.
-    //
-    // Set <parent> field to None if mpv handles the memory automagically
-    parent: Option<Rc<DropWrapper>>,
-    node: libmpv2_sys::mpv_node,
-}
+    impl Iterator for MpvNodeMapIter {
+        type Item = (String, MpvNode);
 
-impl SysMpvNode {
-    pub fn value(&self) -> Result<MpvNode> {
-        let node = self.node;
-        Ok(match node.format {
-            mpv_format::Flag => MpvNode::Flag(unsafe { node.u.flag } == 1),
-            mpv_format::Int64 => MpvNode::Int64(unsafe { node.u.int64 }),
-            mpv_format::Double => MpvNode::Double(unsafe { node.u.double_ }),
-            mpv_format::String => {
-                let text = unsafe { mpv_cstr_to_str!(node.u.string) }?.to_owned();
-                MpvNode::String(text)
-            }
-            mpv_format::Array => {
-                let list = unsafe { *node.u.list };
-                let iter = MpvNodeArrayIter {
-                    node: self.parent.clone(),
-                    start: unsafe { *node.u.list }.values,
-                    end: unsafe { list.values.offset(list.num.try_into().unwrap()) },
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.curr >= self.list.num.try_into().unwrap() {
+                None
+            } else {
+                let offset = self.curr.try_into().unwrap();
+                let (key, value) = unsafe {
+                    (
+                        mpv_cstr_to_str!(*self.list.keys.offset(offset)),
+                        *self.list.values.offset(offset),
+                    )
                 };
-                return Ok(MpvNode::ArrayIter(iter));
+                self.curr += 1;
+                let node = SysMpvNode::child(self.node.clone(), value);
+                Some((key.unwrap().to_string(), node.value().unwrap()))
             }
+        }
+    }
 
-            mpv_format::Map => MpvNode::MapIter(MpvNodeMapIter {
-                list: unsafe { *node.u.list },
-                curr: 0,
-                node: self.parent.clone(),
-            }),
-            mpv_format::None => MpvNode::None,
-            _ => return Err(Error::Raw(mpv_error::PropertyError)),
-        })
+    unsafe impl GetData for MpvNode {
+        fn get_from_c_void<T, F: FnMut(*mut c_void) -> Result<T>>(mut fun: F) -> Result<Self> {
+            let mut val = MaybeUninit::uninit();
+            fun(val.as_mut_ptr() as *mut _)?;
+            let sys_node = unsafe { val.assume_init() };
+            let node = SysMpvNode::new(sys_node, true);
+            node.value()
+        }
+
+        fn get_format() -> Format {
+            Format::Node
+        }
     }
 }
 
@@ -292,23 +328,6 @@ unsafe impl SetData for bool {
 
     fn get_format() -> Format {
         Format::Flag
-    }
-}
-
-unsafe impl GetData for MpvNode {
-    fn get_from_c_void<T, F: FnMut(*mut ctype::c_void) -> Result<T>>(mut fun: F) -> Result<Self> {
-        let mut val = MaybeUninit::uninit();
-        fun(val.as_mut_ptr() as *mut _)?;
-        let sys_node = unsafe { val.assume_init() };
-        let node = SysMpvNode {
-            parent: Some(Rc::new(DropWrapper(sys_node))),
-            node: sys_node,
-        };
-        node.value()
-    }
-
-    fn get_format() -> Format {
-        Format::Node
     }
 }
 

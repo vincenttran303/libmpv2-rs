@@ -1,4 +1,4 @@
-use libmpv2::{events::*, *};
+use libmpv2::{events::*, mpv_node::MpvNode, *};
 
 use std::{collections::HashMap, env, thread, time::Duration};
 

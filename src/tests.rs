@@ -1,4 +1,5 @@
 use crate::events::{Event, EventContext, PropertyData};
+use crate::mpv_node::MpvNode;
 use crate::*;
 
 use std::collections::HashMap;
