@@ -1,6 +1,6 @@
 use crate::{mpv::mpv_err, Error, Result};
 use std::collections::HashMap;
-use std::ffi::{c_void, CStr};
+use std::ffi::{c_char, c_void, CStr};
 use std::os::raw::c_int;
 use std::ptr;
 
@@ -114,7 +114,7 @@ impl<C> From<&RenderParam<C>> for u32 {
     }
 }
 
-unsafe extern "C" fn gpa_wrapper<GLContext>(ctx: *mut c_void, name: *const i8) -> *mut c_void {
+unsafe extern "C" fn gpa_wrapper<GLContext>(ctx: *mut c_void, name: *const c_char) -> *mut c_void {
     if ctx.is_null() {
         panic!("ctx for get_proc_address wrapper is NULL");
     }
